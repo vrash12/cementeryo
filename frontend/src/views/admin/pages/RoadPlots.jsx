@@ -466,6 +466,32 @@ export default function RoadPlots() {
               whenCreated={(map) => (mapRef.current = map)}
               style={{ width: "100%", height: "100%" }}
             >
+              {filteredFC && (
+    <GeoJSON
+      key={`road-modal-overlay-${geoKey}-${onlyAvailable}`}
+      data={filteredFC}
+      style={baseStyle}
+      onEachFeature={(feature, layer) => {
+        const p = feature.properties || {};
+        const html = `
+          <div style="min-width:220px;font-size:12.5px;line-height:1.35">
+            <div><strong>Section:</strong> ${p.plot_name ?? "-"}</div>
+            <div><strong>Type:</strong> ${p.plot_type ?? "-"}</div>
+            <div><strong>Size:</strong> ${p.size_sqm ?? "-"} sqm</div>
+            <div><strong>Status:</strong> ${p.status ?? "-"}</div>
+          </div>`;
+        layer.bindPopup(html);
+      }}
+      pointToLayer={(feature, latlng) =>
+        L.circleMarker(latlng, {
+          radius: 6,
+          weight: 2,
+          fillOpacity: 0.9,
+          color: "#3b82f6",
+        })
+      }
+    />
+  )}
               <TileLayer
                 attribution="&copy; OpenStreetMap contributors"
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"

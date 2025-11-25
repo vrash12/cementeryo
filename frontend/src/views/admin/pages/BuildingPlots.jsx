@@ -777,6 +777,22 @@ export default function BuildingPlots() {
                       url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                       maxZoom={22}
                     />
+                      {filteredFC && (
+    <GeoJSON
+      key={`building-modal-overlay-${geoKey}-${onlyAvailable}`}
+      data={filteredFC}
+      style={baseStyle}
+      onEachFeature={onEachFeature}
+      pointToLayer={(feature, latlng) =>
+        L.circleMarker(latlng, {
+          radius: 6,
+          weight: 2,
+          fillOpacity: 0.9,
+          color: "#3b82f6",
+        })
+      }
+    />
+  )}
                     <CoordinatePicker
                       active={true}
                       onPick={(lat, lng) =>
@@ -914,6 +930,22 @@ export default function BuildingPlots() {
                       url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                       maxZoom={22}
                     />
+                      {filteredFC && (
+    <GeoJSON
+      key={`building-modal-overlay-${geoKey}-${onlyAvailable}`}
+      data={filteredFC}
+      style={baseStyle}
+      onEachFeature={onEachFeature}
+      pointToLayer={(feature, latlng) =>
+        L.circleMarker(latlng, {
+          radius: 6,
+          weight: 2,
+          fillOpacity: 0.9,
+          color: "#3b82f6",
+        })
+      }
+    />
+  )}
                     <CoordinatePicker
                       active={true}
                       onPick={(lat, lng) =>

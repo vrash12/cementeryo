@@ -1,3 +1,4 @@
+//backend/controllers/visitor.controller.js
 const pool = require('../config/database');
 
 // Utility for errors

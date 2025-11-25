@@ -163,29 +163,6 @@ const similarity = (a, b) => {
   return 1 - dist / Math.max(A.length, B.length);
 };
 
-// Score based on first+last similarity (0..1)
-function nameScore(userFirst, userLast, fullName) {
-  const [recFirst, ...rest] = normalizeName(fullName).split(" ");
-  const recLast = rest.length ? rest[rest.length - 1] : "";
-  const sf = similarity(userFirst, recFirst);
-  const sl = similarity(userLast, recLast);
-  // If only first or only last provided, rely on that one more
-  if (userFirst && !userLast) return sf;
-  if (!userFirst && userLast) return sl;
-  return (sf + sl) / 2;
-}
-
-function sameDate(a, b) {
-  if (!a || !b) return false;
-  const da = new Date(a), db = new Date(b);
-  if (Number.isNaN(da.getTime()) || Number.isNaN(db.getTime()))
-    return String(a).slice(0,10) === String(b).slice(0,10);
-  const pad = (n) => String(n).padStart(2,"0");
-  const fa = `${da.getFullYear()}-${pad(da.getMonth()+1)}-${pad(da.getDate())}`;
-  const fb = `${db.getFullYear()}-${pad(db.getMonth()+1)}-${pad(db.getDate())}`;
-  return fa === fb;
-}
-
 // Keep all Leaflet panes beneath app chrome (Topbar/Sidebar).
 function ensureMapBehindUI(map, z = 0) {
   const container = map.getContainer();
@@ -214,10 +191,7 @@ export default function SearchForDeceased() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
-  const [birthDate, setBirthDate] = useState("");
-  const [deathDate, setDeathDate] = useState("");
+  const [nameQuery, setNameQuery] = useState("");  // ✅ single name field
   const [notFoundMsg, setNotFoundMsg] = useState("");
 
   // results
@@ -455,11 +429,6 @@ export default function SearchForDeceased() {
   }, []);
 
   // ------------------------- Search form handlers --------------------------
-  function validateDates() {
-    if (!birthDate || !deathDate) return "Please provide both Birth Date and Death Date.";
-    return "";
-  }
-
   function onSubmit(e) {
     e.preventDefault();
     setScanResult(null);
@@ -470,49 +439,34 @@ export default function SearchForDeceased() {
     setScanDataForSelected(null);
     setMapCoords(null);
 
-    const dateErr = validateDates();
-    if (dateErr) {
-      setNotFoundMsg(dateErr);
+    const q = nameQuery.trim();
+    if (!q) {
+      setNotFoundMsg("Please enter a name to search.");
       return;
     }
 
-    const fn = firstName.trim();
-    const ln = lastName.trim();
-
-    // Filter by exact dates only
-    const dateFiltered = rows.filter((r) =>
-      sameDate(r.birth_date, birthDate) && sameDate(r.death_date, deathDate)
-    );
-
-    if (!dateFiltered.length) {
-      setNotFoundMsg("No records match the given Birth and Death dates.");
+    const availableRows = rows.filter((r) => (r.deceased_name || "").trim().length > 0);
+    if (!availableRows.length) {
+      setNotFoundMsg("No burial records are available.");
       return;
     }
 
-    // If no name provided, show everything from these exact dates as results
-    if (!fn && !ln) {
-      const sorted = [...dateFiltered].sort((a, b) =>
-        String(a.deceased_name || "").localeCompare(String(b.deceased_name || ""))
-      );
-      setResults(sorted);
-      setSuggestions([]);
-      if (sorted.length === 1) handleSelect(sorted[0]);
-      return;
-    }
-
-    // Fuzzy only: compute score and split into results/suggestions
-    const withScores = dateFiltered
-      .map((r) => ({ row: r, score: nameScore(fn, ln, r.deceased_name || "") }))
+    // Fuzzy match on full name only (single query string)
+    const withScores = availableRows
+      .map((r) => ({
+        row: r,
+        score: similarity(q, r.deceased_name || ""),
+      }))
       .sort((a, b) => b.score - a.score);
 
-    const STRONG = 0.70;     // results threshold
-    const WEAK_MIN = 0.40;   // suggestions lower bound
+    const STRONG = 0.70;   // results threshold
+    const WEAK_MIN = 0.40; // suggestions lower bound
 
     const strong = withScores.filter(({ score }) => score >= STRONG).map(({ row }) => row);
     const weak   = withScores.filter(({ score }) => score >= WEAK_MIN && score < STRONG).map(({ row }) => row);
 
     if (!strong.length && !weak.length) {
-      setNotFoundMsg("No records found for those dates with a similar name.");
+      setNotFoundMsg("No records found with a similar name.");
     }
 
     setResults(strong);
@@ -755,89 +709,68 @@ export default function SearchForDeceased() {
 
               <CardHeader className="relative pb-3">
                 <CardTitle className="text-2xl sm:text-3xl text-slate-900">Search For Deceased</CardTitle>
-                <CardDescription className="text-slate-600">Search by name (fuzzy) with exact birth and death dates, or scan a QR code.</CardDescription>
+                <CardDescription className="text-slate-600">
+                  Search by name (fuzzy), or scan a QR code.
+                </CardDescription>
               </CardHeader>
               <CardContent className="relative">
-              {/* Search form */}
-              <form onSubmit={onSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <div>
-                  <label htmlFor="firstName" className="mb-1 block text-sm text-slate-600">First Name</label>
-                  <Input
-                    id="firstName"
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    placeholder="e.g., Juan"
-                  />
+                {/* Search form */}
+                <form
+                  onSubmit={onSubmit}
+                  className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-4"
+                >
+                  <div className="sm:col-span-2 lg:col-span-3">
+                    <label htmlFor="nameQuery" className="mb-1 block text-sm text-slate-600">
+                      Name
+                    </label>
+                    <Input
+                      id="nameQuery"
+                      value={nameQuery}
+                      onChange={(e) => setNameQuery(e.target.value)}
+                      placeholder="e.g., Juan Dela Cruz"
+                    />
+                  </div>
+                  <div className="sm:col-span-1 lg:col-span-1 flex gap-2 items-end">
+                    <Button type="submit">Search</Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        setNameQuery("");
+                        setResults([]);
+                        setSuggestions([]);
+                        setNotFoundMsg("");
+                        setSelected(null);
+                        setScanDataForSelected(null);
+                        setScanResult(null);
+                        setMapCoords(null);
+                      }}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </form>
+
+                {/* Divider + Scan button */}
+                <div className="flex items-center gap-4 my-6">
+                  <div className="h-px flex-1 bg-slate-200" />
+                  <div className="text-xs uppercase tracking-wide text-slate-400">or</div>
+                  <div className="h-px flex-1 bg-slate-200" />
                 </div>
-                <div>
-                  <label htmlFor="lastName" className="mb-1 block text-sm text-slate-600">Last Name</label>
-                  <Input
-                    id="lastName"
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    placeholder="e.g., Dela Cruz"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="birthDate" className="mb-1 block text-sm text-slate-600">Birth Date</label>
-                  <Input
-                    id="birthDate"
-                    type="date"
-                    value={birthDate}
-                    onChange={(e) => setBirthDate(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label htmlFor="deathDate" className="mb-1 block text-sm text-slate-600">Death Date</label>
-                  <Input
-                    id="deathDate"
-                    type="date"
-                    value={deathDate}
-                    onChange={(e) => setDeathDate(e.target.value)}
-                  />
-                </div>
-                <div className="sm:col-span-2 lg:col-span-4 flex gap-2 pt-1">
-                  <Button type="submit">Search</Button>
+
+                <div className="flex justify-center">
                   <Button
-                    type="button"
-                    variant="outline"
                     onClick={() => {
-                      setFirstName("");
-                      setLastName("");
-                      setBirthDate("");
-                      setDeathDate("");
-                      setResults([]);
-                      setSuggestions([]);
-                      setNotFoundMsg("");
-                      setSelected(null);
-                      setScanDataForSelected(null);
-                      setScanResult(null);
-                      setMapCoords(null);
+                      setScanModalOpen(true);
+                      setScanMode("choose");
+                      setScanErr("");
                     }}
                   >
-                    Clear
+                    Scan QR Code
                   </Button>
                 </div>
-              </form>
-
-              {/* Divider + Scan button */}
-              <div className="flex items-center gap-4 my-6">
-                <div className="h-px flex-1 bg-slate-200" />
-                <div className="text-xs uppercase tracking-wide text-slate-400">or</div>
-                <div className="h-px flex-1 bg-slate-200" />
-              </div>
-
-              <div className="flex justify-center">
-                <Button onClick={() => {
-                  setScanModalOpen(true);
-                  setScanMode("choose");
-                  setScanErr("");
-                }}>
-                  Scan QR Code
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
           </div>
         </div>
       </section>
@@ -1066,64 +999,64 @@ export default function SearchForDeceased() {
             <DialogDescription>Use your camera or upload a QR image to locate a grave on the map.</DialogDescription>
           </DialogHeader>
 
-        {scanMode === "choose" && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Button onClick={startCamera}>Open Camera</Button>
+          {scanMode === "choose" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Button onClick={startCamera}>Open Camera</Button>
 
-            <div className="flex items-center justify-center">
-              <label
-                htmlFor="qr-upload"
-                className="w-full cursor-pointer rounded-md border border-input bg-background px-4 py-2.5 text-center text-sm font-medium hover:bg-accent hover:text-accent-foreground"
-              >
-                Upload QR Image
-              </label>
-              <input
-                id="qr-upload"
-                ref={fileRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onClick={(e) => { e.currentTarget.value = ""; }}
-                onChange={(e) => handleUploadFile(e.target.files?.[0] || null)}
-              />
-            </div>
-          </div>
-        )}
-
-        {scanMode === "camera" && (
-          <div className="space-y-3">
-            <div className="rounded-lg overflow-hidden border">
-              <div className="w-full aspect-video bg-muted/40">
-                <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
+              <div className="flex items-center justify-center">
+                <label
+                  htmlFor="qr-upload"
+                  className="w-full cursor-pointer rounded-md border border-input bg-background px-4 py-2.5 text-center text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+                >
+                  Upload QR Image
+                </label>
+                <input
+                  id="qr-upload"
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onClick={(e) => { e.currentTarget.value = ""; }}
+                  onChange={(e) => handleUploadFile(e.target.files?.[0] || null)}
+                />
               </div>
             </div>
+          )}
 
-            {scanErr && (
-              <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
-                {scanErr}
+          {scanMode === "camera" && (
+            <div className="space-y-3">
+              <div className="rounded-lg overflow-hidden border">
+                <div className="w-full aspect-video bg-muted/40">
+                  <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
+                </div>
               </div>
-            )}
 
-            <DialogFooter className="gap-2 sm:gap-0">
-              <Button variant="outline" onClick={() => { stopCamera(); setScanMode("choose"); }}>
-                Back
-              </Button>
-              <Button onClick={closeScanModal}>Close</Button>
-            </DialogFooter>
-          </div>
-        )}
+              {scanErr && (
+                <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
+                  {scanErr}
+                </div>
+              )}
 
-        {scanMode === "upload" && (
-          <div className="text-sm text-slate-600">
-            Processing image… {scanErr && <span className="text-rose-600 font-medium ml-2">{scanErr}</span>}
-          </div>
-        )}
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button variant="outline" onClick={() => { stopCamera(); setScanMode("choose"); }}>
+                  Back
+                </Button>
+                <Button onClick={closeScanModal}>Close</Button>
+              </DialogFooter>
+            </div>
+          )}
 
-        {scanErr && scanMode !== "upload" && scanMode !== "camera" && (
-          <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
-            {scanErr}
-          </div>
-        )}
+          {scanMode === "upload" && (
+            <div className="text-sm text-slate-600">
+              Processing image… {scanErr && <span className="text-rose-600 font-medium ml-2">{scanErr}</span>}
+            </div>
+          )}
+
+          {scanErr && scanMode !== "upload" && scanMode !== "camera" && (
+            <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
+              {scanErr}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

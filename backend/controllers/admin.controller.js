@@ -51,12 +51,12 @@ function makePlotHandlers(tableName) {
     return rows.length > 0;
   };
 
-  const add = async (req, res, next) => {
-    try {
-      const actor = req.user;
-      if (!actor || !["admin", "super_admin"].includes(actor.role)) {
-        return res.status(403).json({ error: "Forbidden: admin only" });
-      }
+const add = async (req, res, next) => {
+  try {
+    const actor = req.user;
+    if (!actor || actor.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden: admin only" });
+    }
 
       const {
         uid: uidRaw,
@@ -191,14 +191,14 @@ function makePlotHandlers(tableName) {
     } catch (err) { next(err); }
   };
 
-  const del = async (req, res, next) => {
-    try {
-      const actor = req.user;
-      if (!actor || !["admin", "super_admin"].includes(actor.role)) {
-        return res.status(403).json({ error: "Forbidden: admin only" });
-      }
+const del = async (req, res, next) => {
+  try {
+    const actor = req.user;
+    if (!actor || actor.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden: admin only" });
+    }
 
-      const raw = req.params?.id ?? req.body?.id;
+    const raw = req.params?.id ?? req.body?.id;
       if (!raw) return res.status(400).json({ error: "id (or uid) is required" });
 
       const sql = `
@@ -329,10 +329,9 @@ async function addBurialRecord(req, res, next) {
   const client = await pool.connect();
   try {
     const actor = req.user;
-    if (!actor || !["admin", "super_admin"].includes(actor.role)) {
+    if (!actor || actor.role !== "admin") {
       return res.status(403).json({ error: "Forbidden: admin only" });
     }
-
     const {
       plot_id,
       deceased_name,

@@ -1,19 +1,11 @@
 // frontend/src/views/admin/pages/BurialPlots.jsx
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { MapContainer, TileLayer, GeoJSON, Popup, useMapEvents, CircleMarker } from "react-leaflet";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
+import { useEffect, useMemo, useState, useCallback } from "react";
 
 import { getAuth } from "../../../utils/auth";
 import { editPlot } from "../js/edit-plot";
 import { addPlot } from "../js/add-plot";
 
 import {
-  MapPin,
-  Layers,
-  Tag,
-  Ruler,
-  Crosshair,
   Plus,
   Eye,
   Pencil,
@@ -21,7 +13,6 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
-// shadcn/ui primitives
 import { Button } from "../../../components/ui/button";
 import {
   Card,
@@ -62,49 +53,72 @@ import {
   AlertDialogDescription,
 } from "../../../components/ui/alert-dialog";
 
+import CemeteryMap, {
+  CEMETERY_CENTER as GOOGLE_CENTER,
+} from "../../../components/map/CemeteryMap";
+
 // shadcn sonner toasts
 import { Toaster, toast } from "sonner";
 
 const API_BASE =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) || "";
 
-/* ---------------- Cemetery focus (center & bounds) ---------------- */
-// Center you already used:
-const CEMETERY_CENTER = [15.49492, 120.55533];
-// Optional tighter bounds around the cemetery (adjust as needed)
-const CEMETERY_BOUNDS = L.latLngBounds(
-  [15.4938, 120.5544], // SW
-  [15.4960, 120.5562]  // NE
-);
-
 /* ---------------- utils ---------------- */
 function centroidOfFeature(feature) {
   try {
     if (!feature?.geometry) return null;
-    if (feature.geometry.type === "Point") {
-      const [lng, lat] = feature.geometry.coordinates || [];
+    const geom = feature.geometry;
+
+    if (geom.type === "Point") {
+      const [lng, lat] = geom.coordinates || [];
       if (typeof lat === "number" && typeof lng === "number") return [lat, lng];
       return null;
     }
-    const b = L.geoJSON(feature).getBounds().getCenter();
-    return [b.lat, b.lng];
+
+    // For Polygon / MultiPolygon: use bounds center of outer ring(s)
+    const collectCoords = () => {
+      const coords = [];
+
+      if (geom.type === "Polygon") {
+        const outer = geom.coordinates?.[0] || [];
+        for (const [lng, lat] of outer) {
+          if (typeof lat === "number" && typeof lng === "number") {
+            coords.push({ lat, lng });
+          }
+        }
+      } else if (geom.type === "MultiPolygon") {
+        for (const poly of geom.coordinates || []) {
+          const outer = poly?.[0] || [];
+          for (const [lng, lat] of outer) {
+            if (typeof lat === "number" && typeof lng === "number") {
+              coords.push({ lat, lng });
+            }
+          }
+        }
+      }
+
+      return coords;
+    };
+
+    const coords = collectCoords();
+    if (!coords.length) return null;
+
+    let minLat = coords[0].lat;
+    let maxLat = coords[0].lat;
+    let minLng = coords[0].lng;
+    let maxLng = coords[0].lng;
+
+    for (const { lat, lng } of coords) {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    }
+
+    return [(minLat + maxLat) / 2, (minLng + maxLng) / 2];
   } catch {
     return null;
   }
-}
-
-/* Click-to-pick component: clicking the map sets lat/lng */
-function CoordinatePicker({ active, onPick }) {
-  useMapEvents({
-    click(e) {
-      if (!active) return;
-      const { lat, lng } = e.latlng || {};
-      if (typeof lat === "number" && typeof lng === "number") {
-        onPick(lat, lng);
-      }
-    },
-  });
-  return null;
 }
 
 export default function BurialPlots() {
@@ -112,10 +126,12 @@ export default function BurialPlots() {
   const [error, setError] = useState(null);
   const [onlyAvailable, setOnlyAvailable] = useState(true);
 
-  const [hoveredRow, setHoveredRow] = useState(null);
-  const [selectedRow, setSelectedRow] = useState(null);
+  // map view state
+  const [mapCenter, setMapCenter] = useState(GOOGLE_CENTER);
+  const [mapZoom, setMapZoom] = useState(19);
 
-  // dialogs (view/edit/add)
+const [roadsFc, setRoadsFc] = useState(null);
+
   const [viewOpen, setViewOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -124,12 +140,6 @@ export default function BurialPlots() {
   // delete confirm
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmId, setConfirmId] = useState(null);
-
-  // geojson remount key
-  const [geoKey, setGeoKey] = useState(0);
-
-  const mapRef = useRef(null);
-  const center = useMemo(() => CEMETERY_CENTER, []);
 
   const auth = getAuth();
   const token = auth?.token;
@@ -143,22 +153,38 @@ export default function BurialPlots() {
       const ct = res.headers.get("content-type") || "";
       if (!res.ok) {
         const body = ct.includes("application/json") ? await res.json() : await res.text();
-        throw new Error(ct.includes("application/json") ? JSON.stringify(body) : body.slice(0, 200));
+        throw new Error(
+          ct.includes("application/json") ? JSON.stringify(body) : body.slice(0, 200)
+        );
       }
       const json = await res.json();
       setFc(json);
-      setGeoKey((k) => k + 1);
-      setHoveredRow(null);
-      setSelectedRow(null);
-      mapRef.current?.closePopup?.();
     } catch (e) {
       setError(String(e));
     }
   }, []);
+const fetchRoads = useCallback(async () => {
+  try {
+    const res = await fetch(`${API_BASE}/plot/road-plots`);
+    const ct = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      const body = ct.includes("application/json") ? await res.json() : await res.text();
+      throw new Error(
+        ct.includes("application/json") ? JSON.stringify(body) : body.slice(0, 200)
+      );
+    }
+    const json = await res.json();
+    setRoadsFc(json);
+  } catch (e) {
+    console.error("Failed to load road plots:", e);
+    // optional: you can toast here if you want
+  }
+}, []);
 
-  useEffect(() => {
-    fetchPlots();
-  }, [fetchPlots]);
+useEffect(() => {
+  fetchPlots();
+  fetchRoads();      // 👈 also load road lines
+}, [fetchPlots, fetchRoads]);
 
   const rows = useMemo(() => {
     if (!fc?.features) return [];
@@ -185,36 +211,126 @@ export default function BurialPlots() {
       });
   }, [fc, onlyAvailable]);
 
-  const baseStyle = (feature) => {
-    const s = (feature?.properties?.status || "").toLowerCase();
-    if (onlyAvailable && s !== "available")
-      return { opacity: 0.15, fillOpacity: 0.08, color: "#94a3b8", weight: 2, dashArray: "4 3" };
-    if (s === "available") return { color: "#10b981", weight: 2.5, fillOpacity: 0.35, opacity: 1 };
-    if (s === "reserved") return { color: "#f59e0b", weight: 2.5, fillOpacity: 0.35, opacity: 1 };
-    if (s === "occupied") return { color: "#ef4444", weight: 2.5, fillOpacity: 0.35, opacity: 1 };
-    return { color: "#3b82f6", weight: 2.5, fillOpacity: 0.35, opacity: 1 };
-  };
+  const markers = useMemo(
+    () =>
+      rows
+        .filter((r) => r.lat != null && r.lng != null)
+        .map((r) => ({
+          id: r.id,
+          position: { lat: r.lat, lng: r.lng },
+          title: `${r.plot_name ?? ""} (${r.status ?? ""})`,
+          label: r.plot_name ? r.plot_name[0].toUpperCase() : undefined,
+        })),
+    [rows]
+  );
+const plotPolygons = useMemo(() => {
+  if (!fc?.features) return [];
 
-  const filteredFC = useMemo(() => {
-    if (!fc?.features) return null;
-    return {
-      type: "FeatureCollection",
-      features: (fc.features || []).filter((f) => {
-        if (!onlyAvailable) return true;
-        const s = (f.properties?.status || "").toLowerCase();
-        return s === "available";
-      }),
-    };
-  }, [fc, onlyAvailable]);
+  return fc.features
+    .map((f) => {
+      const geom = f.geometry;
+      if (!geom) return null;
 
-  const highlightFeature = hoveredRow?._feature || null;
+      let coords = [];
+
+      if (geom.type === "Polygon") {
+        const outer = geom.coordinates?.[0] || [];
+        coords = outer
+          .map(([lng, lat]) =>
+            typeof lat === "number" && typeof lng === "number"
+              ? { lat, lng }
+              : null
+          )
+          .filter(Boolean);
+      } else if (geom.type === "MultiPolygon") {
+        // take first ring of first polygon
+        const outer = geom.coordinates?.[0]?.[0] || [];
+        coords = outer
+          .map(([lng, lat]) =>
+            typeof lat === "number" && typeof lng === "number"
+              ? { lat, lng }
+              : null
+          )
+          .filter(Boolean);
+      } else {
+        // ignore Point/LineString/etc for polygons
+        return null;
+      }
+
+      if (!coords.length) return null;
+
+      const props = f.properties || {};
+      const status = (props.status || "").toLowerCase();
+
+      let fillColor = "#10b981"; // available
+      if (status === "reserved") fillColor = "#f59e0b";
+      else if (status === "occupied") fillColor = "#ef4444";
+
+      return {
+        id: props.id ?? props.uid ?? undefined,
+        path: coords,
+        options: {
+          strokeColor: fillColor,
+          strokeOpacity: 1,
+          strokeWeight: 1.2,
+          fillColor,
+          fillOpacity: 0.5,
+        },
+      };
+    })
+    .filter(Boolean);
+}, [fc]);
+const roadLines = useMemo(() => {
+  if (!roadsFc?.features) return [];
+
+  return roadsFc.features
+    .map((f) => {
+      const g = f.geometry;
+      if (!g) return null;
+
+      let coords = [];
+
+      if (g.type === "LineString") {
+        coords =
+          g.coordinates?.map(([lng, lat]) =>
+            typeof lat === "number" && typeof lng === "number"
+              ? { lat, lng }
+              : null
+          ) || [];
+      } else if (g.type === "MultiLineString") {
+        coords = (g.coordinates || []).flatMap((seg) =>
+          (seg || []).map(([lng, lat]) =>
+            typeof lat === "number" && typeof lng === "number"
+              ? { lat, lng }
+              : null
+          )
+        );
+      } else {
+        return null;
+      }
+
+      coords = coords.filter(Boolean);
+      if (!coords.length) return null;
+
+      const props = f.properties || {};
+
+      return {
+        id: props.id ?? props.uid ?? undefined,
+        path: coords,
+        options: {
+          strokeColor: "#facc15", // bright yellow
+          strokeOpacity: 1,
+          strokeWeight: 3,
+        },
+      };
+    })
+    .filter(Boolean);
+}, [roadsFc]);
 
   const onRowClick = (row) => {
-    setSelectedRow(row);
-    const map = mapRef.current;
-    if (!map) return;
     if (row.lat != null && row.lng != null) {
-      map.flyTo([row.lat, row.lng], Math.max(map.getZoom(), 19), { duration: 0.7 });
+      setMapCenter({ lat: row.lat, lng: row.lng });
+      setMapZoom((z) => (z < 19 ? 19 : z));
     }
   };
 
@@ -278,11 +394,15 @@ export default function BurialPlots() {
     if (!token) throw new Error("You're not authenticated. Please sign in again.");
     const url = `${API_BASE}/admin/delete-plot/${encodeURIComponent(id)}`;
 
-    let res = await fetch(url, { method: "DELETE", headers: { ...authHeader } }).catch(() => null);
+    let res = await fetch(url, { method: "DELETE", headers: { ...authHeader } }).catch(
+      () => null
+    );
 
     if (!res || !res.ok) {
       // some backends keep a GET fallback
-      res = await fetch(url, { method: "GET", headers: { ...authHeader } }).catch(() => null);
+      res = await fetch(url, { method: "GET", headers: { ...authHeader } }).catch(
+        () => null
+      );
     }
 
     if (!res || !res.ok) {
@@ -300,7 +420,8 @@ export default function BurialPlots() {
   };
 
   const confirmDelete = (row) => {
-    const id = row?.id ?? row?._feature?.properties?.id ?? row?._feature?.properties?.uid;
+    const id =
+      row?.id ?? row?._feature?.properties?.id ?? row?._feature?.properties?.uid;
     if (!id) {
       toast.error("Missing plot ID. Cannot delete.");
       return;
@@ -333,7 +454,9 @@ export default function BurialPlots() {
         <Alert variant="destructive" className="border-rose-200">
           <TriangleAlert className="h-4 w-4" />
           <AlertTitle>Failed to load plots</AlertTitle>
-          <AlertDescription className="break-words">{error}</AlertDescription>
+          <AlertDescription className="break-words">
+            {error}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -348,10 +471,8 @@ export default function BurialPlots() {
         </CardHeader>
 
         <CardContent className="overflow-x-auto">
-          {/* limit height + vertical scroll */}
           <div className="max-h-[420px] overflow-y-auto rounded-md border border-border">
             <Table className="min-w-full">
-              {/* sticky header so it remains visible while scrolling */}
               <TableHeader className="sticky top-0 z-10 bg-background">
                 <TableRow>
                   <TableHead className="w-[22%]">Plot Name</TableHead>
@@ -366,7 +487,10 @@ export default function BurialPlots() {
               <TableBody>
                 {rows.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground py-6">
+                    <TableCell
+                      colSpan={6}
+                      className="text-center text-muted-foreground py-6"
+                    >
                       No plots to display.
                     </TableCell>
                   </TableRow>
@@ -385,14 +509,14 @@ export default function BurialPlots() {
                     return (
                       <TableRow
                         key={r.id ?? `${r.plot_name}-${idx}`}
-                        onMouseEnter={() => setHoveredRow(r)}
-                        onMouseLeave={() => setHoveredRow(null)}
                         onClick={() => onRowClick(r)}
                         className="cursor-pointer"
                       >
                         <TableCell>{r.plot_name ?? "-"}</TableCell>
                         <TableCell>{r.plot_type ?? "-"}</TableCell>
-                        <TableCell className="tabular-nums">{r.size_sqm ?? "-"}</TableCell>
+                        <TableCell className="tabular-nums">
+                          {r.size_sqm ?? "-"}
+                        </TableCell>
                         <TableCell>
                           <Badge variant={badgeVariant}>{r.status ?? "-"}</Badge>
                         </TableCell>
@@ -450,90 +574,20 @@ export default function BurialPlots() {
             <CardDescription>Interactive burial plot map</CardDescription>
           </CardHeader>
           <CardContent className="h-[60vh]">
-            <MapContainer
-              center={center}
-              zoom={19}
-              minZoom={16}
-              maxZoom={22}
-              whenCreated={(map) => (mapRef.current = map)}
-              style={{ width: "100%", height: "100%" }}
-            >
-              <TileLayer
-                attribution="&copy; OpenStreetMap contributors"
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                maxZoom={22}
-              />
+            <div className="h-full rounded-md overflow-hidden border">
+          <CemeteryMap
+  center={mapCenter}
+  zoom={mapZoom}
+  clickable={false}
+  showGeofence={true}
+  restrictToGeofence={true}
+  markers={[]}                 // no pins
+  polygons={plotPolygons}      // green graves
+  polylines={roadLines}        // 👈 yellow roads from road_plots
+/>
 
-              {filteredFC && (
-                <GeoJSON
-                  key={`plots-${geoKey}-${onlyAvailable}`}
-                  data={filteredFC}
-                  style={baseStyle}
-                  onEachFeature={(feature, layer) => {
-                    const p = feature.properties || {};
-                    const html = `
-                      <div style="min-width:220px;font-size:12.5px;line-height:1.35">
-                        <div><strong>Section:</strong> ${p.plot_name ?? "-"}</div>
-                        <div><strong>Type:</strong> ${p.plot_type ?? "-"}</div>
-                        <div><strong>Size:</strong> ${p.size_sqm ?? "-"} sqm</div>
-                        <div><strong>Status:</strong> ${p.status ?? "-"}</div>
-                      </div>`;
-                    layer.bindPopup(html);
-                  }}
-                  pointToLayer={(feature, latlng) =>
-                    L.circleMarker(latlng, { radius: 6, weight: 2, fillOpacity: 0.9, color: "#3b82f6" })
-                  }
-                />
-              )}
 
-              {highlightFeature && (
-                <GeoJSON
-                  key={hoveredRow?.id || "hover-highlight"}
-                  data={highlightFeature}
-                  style={() => ({
-                    color: "#0ea5e9",
-                    weight: 4,
-                    opacity: 1,
-                    fillOpacity: 0.15,
-                    fillColor: "#38bdf8",
-                  })}
-                  pointToLayer={(feature, latlng) =>
-                    L.circleMarker(latlng, {
-                      radius: 10,
-                      weight: 4,
-                      color: "#0ea5e9",
-                      opacity: 1,
-                      fillOpacity: 0.15,
-                    })
-                  }
-                />
-              )}
-
-              {(() => {
-                const popupRow = hoveredRow || selectedRow || null;
-                const popupPos =
-                  popupRow && popupRow.lat != null && popupRow.lng != null
-                    ? [popupRow.lat, popupRow.lng]
-                    : null;
-                if (!popupRow || !popupPos) return null;
-                return (
-                  <Popup position={popupPos} autoPan={false} closeButton={false}>
-                    <div className="text-sm space-y-1">
-                      <div>Type: {popupRow.plot_type ?? "-"}</div>
-                      <div>Section: {popupRow.plot_name ?? "-"}</div>
-                      <div>Size: {popupRow.size_sqm ?? "-"} sqm</div>
-                      <div>
-                        Coords:{" "}
-                        {popupRow.lat && popupRow.lng
-                          ? `${popupRow.lat.toFixed(6)}, ${popupRow.lng.toFixed(6)}`
-                          : "—"}
-                      </div>
-                      <div>Status: {popupRow.status ?? "-"}</div>
-                    </div>
-                  </Popup>
-                );
-              })()}
-            </MapContainer>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -581,18 +635,22 @@ export default function BurialPlots() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                // Coerce numbers / trim strings
                 const payload = {
                   id: modalRow.id ?? "",
                   uid: modalRow.uid ?? "",
                   plot_name: (modalRow.plot_name ?? "").toString().trim(),
                   status: (modalRow.status ?? "").toString().trim(),
                   plot_type: (modalRow.plot_type ?? "").toString().trim(),
-                  size_sqm: modalRow.size_sqm === "" ? null : Number(modalRow.size_sqm),
+                  size_sqm:
+                    modalRow.size_sqm === "" ? null : Number(modalRow.size_sqm),
                   latitude:
-                    modalRow.latitude === "" ? null : Number.parseFloat(String(modalRow.latitude)),
+                    modalRow.latitude === ""
+                      ? null
+                      : Number.parseFloat(String(modalRow.latitude)),
                   longitude:
-                    modalRow.longitude === "" ? null : Number.parseFloat(String(modalRow.longitude)),
+                    modalRow.longitude === ""
+                      ? null
+                      : Number.parseFloat(String(modalRow.longitude)),
                 };
                 handleEditSubmit(payload);
               }}
@@ -601,24 +659,36 @@ export default function BurialPlots() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label>Id</Label>
-                  <Input value={modalRow.id ?? ""} readOnly className="text-slate-500 border-slate-200" />
+                  <Input
+                    value={modalRow.id ?? ""}
+                    readOnly
+                    className="text-slate-500 border-slate-200"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Uid</Label>
-                  <Input value={modalRow.uid ?? ""} readOnly className="text-slate-500 border-slate-200" />
+                  <Input
+                    value={modalRow.uid ?? ""}
+                    readOnly
+                    className="text-slate-500 border-slate-200"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Plot Name</Label>
                   <Input
                     value={modalRow.plot_name ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, plot_name: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, plot_name: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Status</Label>
                   <select
                     value={modalRow.status ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, status: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, status: e.target.value }))
+                    }
                     className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 focus-visible:ring-offset-0"
                   >
                     <option value="">— Select Status —</option>
@@ -631,7 +701,9 @@ export default function BurialPlots() {
                   <Label>Plot Type</Label>
                   <Input
                     value={modalRow.plot_type ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, plot_type: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, plot_type: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -639,7 +711,9 @@ export default function BurialPlots() {
                   <Input
                     type="number"
                     value={modalRow.size_sqm ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, size_sqm: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, size_sqm: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -647,7 +721,9 @@ export default function BurialPlots() {
                   <Input
                     type="number"
                     value={modalRow.latitude ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, latitude: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, latitude: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -655,7 +731,9 @@ export default function BurialPlots() {
                   <Input
                     type="number"
                     value={modalRow.longitude ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, longitude: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, longitude: e.target.value }))
+                    }
                   />
                 </div>
               </div>
@@ -664,49 +742,61 @@ export default function BurialPlots() {
               <div className="space-y-2">
                 <Label>Pick Location on Map</Label>
                 <div className="h-72 rounded-md overflow-hidden border">
-                  <MapContainer
+                  <CemeteryMap
                     center={
                       modalRow.latitude && modalRow.longitude
-                        ? [Number(modalRow.latitude), Number(modalRow.longitude)]
-                        : CEMETERY_CENTER
+                        ? {
+                            lat: Number(modalRow.latitude),
+                            lng: Number(modalRow.longitude),
+                          }
+                        : GOOGLE_CENTER
                     }
                     zoom={modalRow.latitude && modalRow.longitude ? 20 : 19}
-                    minZoom={17}
-                    maxZoom={22}
-                    bounds={CEMETERY_BOUNDS}
-                    style={{ width: "100%", height: "100%" }}
-                  >
-                    <TileLayer
-                      attribution="&copy; OpenStreetMap contributors"
-                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                      maxZoom={22}
-                    />
-                    <CoordinatePicker
-                      active={true}
-                      onPick={(lat, lng) =>
-                        setModalRow((m) => (m ? { ...m, latitude: lat.toFixed(6), longitude: lng.toFixed(6) } : m))
-                      }
-                    />
-                    {modalRow.latitude !== "" &&
-                      modalRow.longitude !== "" &&
+                    clickable={true}
+                    restrictToGeofence={true}
+                    onCoordinatePick={({ lat, lng }) => {
+                      setModalRow((m) =>
+                        m
+                          ? {
+                              ...m,
+                              latitude: lat.toFixed(6),
+                              longitude: lng.toFixed(6),
+                            }
+                          : m
+                      );
+                    }}
+                    onClickOutsideGeofence={() =>
+                      toast.error("Selected point is outside the cemetery boundary.")
+                    }
+                    markers={
+                      modalRow.latitude &&
+                      modalRow.longitude &&
                       Number.isFinite(Number(modalRow.latitude)) &&
-                      Number.isFinite(Number(modalRow.longitude)) && (
-                        <CircleMarker
-                          center={[Number(modalRow.latitude), Number(modalRow.longitude)]}
-                          radius={8}
-                          weight={3}
-                          opacity={1}
-                          color="#0ea5e9"
-                          fillOpacity={0.25}
-                        />
-                      )}
-                  </MapContainer>
+                      Number.isFinite(Number(modalRow.longitude))
+                        ? [
+                            {
+                              id: "edit-plot-marker",
+                              position: {
+                                lat: Number(modalRow.latitude),
+                                lng: Number(modalRow.longitude),
+                              },
+                            },
+                          ]
+                        : []
+                    }
+                  />
                 </div>
-                <p className="text-xs text-muted-foreground">Click the map to set coordinates.</p>
+                <p className="text-xs text-muted-foreground">
+                  Click inside the green boundary to set coordinates.
+                </p>
               </div>
 
               <DialogFooter className="gap-2 sm:gap-0">
-                <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setEditOpen(false)}
+                >
                   Cancel
                 </Button>
                 <Button type="submit">Save</Button>
@@ -731,11 +821,16 @@ export default function BurialPlots() {
                   plot_name: (modalRow.plot_name ?? "").toString().trim(),
                   status: (modalRow.status ?? "").toString().trim(),
                   plot_type: (modalRow.plot_type ?? "").toString().trim(),
-                  size_sqm: modalRow.size_sqm === "" ? null : Number(modalRow.size_sqm),
+                  size_sqm:
+                    modalRow.size_sqm === "" ? null : Number(modalRow.size_sqm),
                   latitude:
-                    modalRow.latitude === "" ? null : Number.parseFloat(String(modalRow.latitude)),
+                    modalRow.latitude === ""
+                      ? null
+                      : Number.parseFloat(String(modalRow.latitude)),
                   longitude:
-                    modalRow.longitude === "" ? null : Number.parseFloat(String(modalRow.longitude)),
+                    modalRow.longitude === ""
+                      ? null
+                      : Number.parseFloat(String(modalRow.longitude)),
                 };
                 handleAddSubmit(payload);
               }}
@@ -746,14 +841,18 @@ export default function BurialPlots() {
                   <Label>Plot Name</Label>
                   <Input
                     value={modalRow.plot_name ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, plot_name: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, plot_name: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Status</Label>
                   <select
                     value={modalRow.status ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, status: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, status: e.target.value }))
+                    }
                     className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 focus-visible:ring-offset-0"
                   >
                     <option value="">— Select Status —</option>
@@ -766,7 +865,9 @@ export default function BurialPlots() {
                   <Label>Plot Type</Label>
                   <Input
                     value={modalRow.plot_type ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, plot_type: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, plot_type: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -774,7 +875,9 @@ export default function BurialPlots() {
                   <Input
                     type="number"
                     value={modalRow.size_sqm ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, size_sqm: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, size_sqm: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -782,7 +885,9 @@ export default function BurialPlots() {
                   <Input
                     type="number"
                     value={modalRow.latitude ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, latitude: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, latitude: e.target.value }))
+                    }
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -790,7 +895,9 @@ export default function BurialPlots() {
                   <Input
                     type="number"
                     value={modalRow.longitude ?? ""}
-                    onChange={(e) => setModalRow((m) => ({ ...m, longitude: e.target.value }))}
+                    onChange={(e) =>
+                      setModalRow((m) => ({ ...m, longitude: e.target.value }))
+                    }
                   />
                 </div>
               </div>
@@ -799,49 +906,61 @@ export default function BurialPlots() {
               <div className="space-y-2">
                 <Label>Pick Location on Map</Label>
                 <div className="h-72 rounded-md overflow-hidden border">
-                  <MapContainer
+                  <CemeteryMap
                     center={
                       modalRow.latitude && modalRow.longitude
-                        ? [Number(modalRow.latitude), Number(modalRow.longitude)]
-                        : CEMETERY_CENTER
+                        ? {
+                            lat: Number(modalRow.latitude),
+                            lng: Number(modalRow.longitude),
+                          }
+                        : GOOGLE_CENTER
                     }
                     zoom={modalRow.latitude && modalRow.longitude ? 20 : 19}
-                    minZoom={17}
-                    maxZoom={22}
-                    bounds={CEMETERY_BOUNDS}
-                    style={{ width: "100%", height: "100%" }}
-                  >
-                    <TileLayer
-                      attribution="&copy; OpenStreetMap contributors"
-                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                      maxZoom={22}
-                    />
-                    <CoordinatePicker
-                      active={true}
-                      onPick={(lat, lng) =>
-                        setModalRow((m) => (m ? { ...m, latitude: lat.toFixed(6), longitude: lng.toFixed(6) } : m))
-                      }
-                    />
-                    {modalRow.latitude !== "" &&
-                      modalRow.longitude !== "" &&
+                    clickable={true}
+                    restrictToGeofence={true}
+                    onCoordinatePick={({ lat, lng }) => {
+                      setModalRow((m) =>
+                        m
+                          ? {
+                              ...m,
+                              latitude: lat.toFixed(6),
+                              longitude: lng.toFixed(6),
+                            }
+                          : m
+                      );
+                    }}
+                    onClickOutsideGeofence={() =>
+                      toast.error("Selected point is outside the cemetery boundary.")
+                    }
+                    markers={
+                      modalRow.latitude &&
+                      modalRow.longitude &&
                       Number.isFinite(Number(modalRow.latitude)) &&
-                      Number.isFinite(Number(modalRow.longitude)) && (
-                        <CircleMarker
-                          center={[Number(modalRow.latitude), Number(modalRow.longitude)]}
-                          radius={8}
-                          weight={3}
-                          opacity={1}
-                          color="#0ea5e9"
-                          fillOpacity={0.25}
-                        />
-                      )}
-                  </MapContainer>
+                      Number.isFinite(Number(modalRow.longitude))
+                        ? [
+                            {
+                              id: "add-plot-marker",
+                              position: {
+                                lat: Number(modalRow.latitude),
+                                lng: Number(modalRow.longitude),
+                              },
+                            },
+                          ]
+                        : []
+                    }
+                  />
                 </div>
-                <p className="text-xs text-muted-foreground">Click the map to set coordinates.</p>
+                <p className="text-xs text-muted-foreground">
+                  Click inside the green boundary to set coordinates.
+                </p>
               </div>
 
               <DialogFooter className="gap-2 sm:gap-0">
-                <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setAddOpen(false)}
+                >
                   Cancel
                 </Button>
                 <Button type="submit">Add</Button>
@@ -871,8 +990,6 @@ export default function BurialPlots() {
                 try {
                   await requestDelete(id);
                   toast.success("Plot deleted successfully.");
-                  setHoveredRow((h) => (h?.id === id ? null : h));
-                  setSelectedRow((s) => (s?.id === id ? null : s));
                   await fetchPlots();
                 } catch (err) {
                   toast.error(err?.message || "Failed to delete plot.");

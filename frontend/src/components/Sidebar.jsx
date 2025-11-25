@@ -40,8 +40,12 @@ export default function Sidebar({ base = "" }) {
   const [authObj, setAuthObj] = useState(() => getAuth());
   const user = authObj?.user || {};
   const role = user?.role || "visitor";
+
+  // visitors don't see this sidebar
   if (role === "visitor") return null;
-  const fullName = `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || "—";
+
+  const fullName =
+    `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || "—";
   const initials =
     ((user?.first_name?.[0] || "") + (user?.last_name?.[0] || "") || "CL").toUpperCase();
 
@@ -72,30 +76,31 @@ export default function Sidebar({ base = "" }) {
     maintenance: Wrench,
   };
 
+  // Admin has all admin + former super-admin + staff items
   const items = useMemo(() => {
-    if (role === "super_admin") {
-      return [
-        { to: "/setup", label: "Cemetery Setup", icon: I.setup },
-        { to: "/admin", label: "Admins", icon: I.admins },
-        { to: "/staff", label: "Staff", icon: I.staff },
-        { to: "/visitor", label: "Visitors", icon: I.visitors },
-      ];
-    }
     if (role === "admin") {
       return [
+  
+    
+       
+        { to: "/visitor", label: "Visitors", icon: I.visitors },
+
+        // plots / records
         { to: "/plots", label: "Burial Plots", icon: I.plots },
         { to: "/road-plots", label: "Road Plots", icon: I.plots },
         { to: "/building-plots", label: "Building Plots", icon: I.plots },
         { to: "/records", label: "Burial Records", icon: I.records },
-      ];
-    }
-    if (role === "staff") {
-      return [
+
+
         { to: "/tickets", label: "View Tickets", icon: I.tickets },
         { to: "/burials", label: "Burial Schedule", icon: I.burials },
         { to: "/maintenance", label: "Maintenance", icon: I.maintenance },
       ];
     }
+
+
+
+    // Fallback / future roles
     return [{ to: "/visitor/dashboard", label: "Dashboard", icon: I.dashboard }];
   }, [role]);
 
@@ -150,8 +155,12 @@ export default function Sidebar({ base = "" }) {
               </div>
               {!collapsed && (
                 <div className="leading-tight text-left">
-                  <div className="text-[13px] font-semibold bg-gradient-to-r from-emerald-600 to-cyan-600 bg-clip-text text-transparent">{fullName}</div>
-                  <div className="text-[11px] text-slate-600 font-medium capitalize">{role.replace("_", " ")}</div>
+                  <div className="text-[13px] font-semibold bg-gradient-to-r from-emerald-600 to-cyan-600 bg-clip-text text-transparent">
+                    {fullName}
+                  </div>
+                  <div className="text-[11px] text-slate-600 font-medium capitalize">
+                    {role.replace("_", " ")}
+                  </div>
                 </div>
               )}
             </button>
@@ -164,7 +173,11 @@ export default function Sidebar({ base = "" }) {
               title={collapsed ? "Expand" : "Collapse"}
               className="h-9 w-9 rounded-xl border border-emerald-200 bg-white hover:bg-gradient-to-br hover:from-emerald-50 hover:to-cyan-50 shadow-md hover:shadow-lg transition-all"
             >
-              {collapsed ? <Menu size={18} className="text-emerald-600" /> : <ChevronLeft size={18} className="text-emerald-600" />}
+              {collapsed ? (
+                <Menu size={18} className="text-emerald-600" />
+              ) : (
+                <ChevronLeft size={18} className="text-emerald-600" />
+              )}
             </Button>
           </CardHeader>
 

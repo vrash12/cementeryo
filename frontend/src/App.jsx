@@ -3,72 +3,84 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 import ProtectedRoute from "./routes/ProtectedRoute";
 import RoleLayout from "./layouts/RoleLayout";
-import BareLayout from "./layouts/BareLayout";
 import VisitorLayout from "./views/visitor/layouts/VisitorLayout";
 import VisitorInquire from "./views/visitor/pages/Inquire";
 import AlertsHost from "./views/components/AlertsHost";
-import CemeterySetup from "./views/superadmin/pages/CemeterySetup";
+
+// Admin pages
 import BurialPlots from "./views/admin/pages/BurialPlots";
 import BurialRecords from "./views/admin/pages/BurialRecords";
 import RoadPlots from "./views/admin/pages/RoadPlots";
 import BuildingPlots from "./views/admin/pages/BuildingPlots";
+import ViewTickets from "./views/admin/pages/ViewTickets";
+import BurialSchedule from "./views/admin/pages/BurialSchedule";
+import MaintenanceSchedules from "./views/admin/pages/MaintenanceSchedule";
+import VisitorManagement from "./views/admin/pages/Visitor"; // ⬅️ NEW
+
+// Visitor pages
 import SearchForDeceased from "./views/visitor/pages/SearchForDeceased";
+
+// utils
 import { getAuth } from "./utils/auth";
-import ViewTickets from "./views/staff/pages/ViewTickets";
-import BurialSchedule from "./views/staff/pages/BurialSchedule";
-import MaintenanceSchedules from "./views/staff/pages/MaintenanceSchedule";
 
-const AdminSet   = lazy(() => import("./views/admin/pages/Settings"));
+const AdminSet = lazy(() => import("./views/admin/pages/Settings"));
 
-const VisitorHome  = lazy(() => import("./views/visitor/pages/Home"));
+const VisitorHome = lazy(() => import("./views/visitor/pages/Home"));
 const VisitorLogin = lazy(() => import("./views/login/Login"));
-const VisitorSet   = lazy(() => import("./views/visitor/pages/Settings"));
-
-const SuperAdminAdmin   = lazy(() => import("./views/superadmin/pages/Admin"));
-const SuperAdminStaff   = lazy(() => import("./views/superadmin/pages/Staff"));
-const SuperAdminVisitor = lazy(() => import("./views/superadmin/pages/Visitor"));
+const VisitorSet = lazy(() => import("./views/visitor/pages/Settings"));
 
 function Loading() {
   return <div className="p-6">Loading…</div>;
 }
 
-/* ---------- helpers ---------- */
+/* ---------- role helpers ---------- */
+function canonicalRole(rawRole) {
+  if (!rawRole) return null;
+  const r = String(rawRole).toLowerCase();
+  if (r === "super_admin" || r === "staff") return "admin";
+  return r;
+}
+
 function defaultPathFor(role) {
-  switch ((role || "").toLowerCase()) {
+  const r = canonicalRole(role);
+  switch (r) {
     case "admin":
       return "/admin/plots";
-    case "staff":
-      return "/staff/tickets";
-    case "super_admin":
-      return "/superadmin/setup";
+    case "visitor":
+      return "/visitor/home";
     default:
       return "/visitor/home";
   }
 }
+
 function RoleLanding() {
   const auth = getAuth();
   const role = auth?.user?.role;
   return <Navigate to={defaultPathFor(role)} replace />;
 }
+
 function PortalGuard({ allow, children }) {
   const auth = getAuth();
-  const role = auth?.user?.role;
-  if (role && !allow.includes(role)) {
+  const role = canonicalRole(auth?.user?.role);
+
+  // If logged in but role not allowed for this portal, bounce to their default
+  if (role && allow && !allow.includes(role)) {
     return <Navigate to={defaultPathFor(role)} replace />;
   }
   return children;
 }
 
+/* ---------- app routes ---------- */
 export default function App() {
   return (
     <BrowserRouter>
       <Suspense fallback={<Loading />}>
         <AlertsHost />
         <Routes>
-          {/* Root: Go to role-specific default if logged in, else visitor home */}
+          {/* Root: send logged-in users to their portal, others to visitor home */}
           <Route path="/" element={<RoleLanding />} />
 
-          {/* Visitor (public, but redirect logged-in users of other roles to their portals) */}
+          {/* VISITOR (public) */}
           <Route
             path="/visitor"
             element={
@@ -86,67 +98,45 @@ export default function App() {
             <Route path="*" element={<Navigate to="/visitor/home" replace />} />
           </Route>
 
-          {/* Staff (protected + guard) */}
-          <Route element={<ProtectedRoute allow={['staff']} />}>
-            <Route
-              path="/staff/*"
-              element={
-                <PortalGuard allow={["staff"]}>
-                  <RoleLayout base="/staff">
-                    <Routes>
-                      <Route index element={<Navigate to="/staff/tickets" replace />} />
-                      <Route path="tickets" element={<ViewTickets />} />
-                      <Route path="burials" element={<BurialSchedule />} />
-                      <Route path="maintenance" element={<MaintenanceSchedules />} />
-                      {/* Any stray staff path → tickets */}
-                      <Route path="*" element={<Navigate to="/staff/tickets" replace />} />
-                    </Routes>
-                  </RoleLayout>
-                </PortalGuard>
-              }
-            />
-          </Route>
-
-          {/* Admin (protected + guard) */}
-          <Route element={<ProtectedRoute allow={['admin']} />}>
+          {/* ADMIN (includes former super_admin + staff features) */}
+          <Route element={<ProtectedRoute allow={["admin"]} />}>
             <Route
               path="/admin/*"
               element={
                 <PortalGuard allow={["admin"]}>
                   <RoleLayout base="/admin">
                     <Routes>
-                      {/* Default: plots */}
-                      <Route index element={<Navigate to="/admin/plots" replace />} />
+                      {/* Default admin landing: plots */}
+                      <Route
+                        index
+                        element={<Navigate to="/admin/plots" replace />}
+                      />
+
+                      {/* 🔹 Visitors management (matches sidebar `to: "/visitor"`) */}
+                      <Route path="visitor" element={<VisitorManagement />} />
+
+                      {/* Plot management */}
                       <Route path="plots" element={<BurialPlots />} />
                       <Route path="road-plots" element={<RoadPlots />} />
                       <Route path="building-plots" element={<BuildingPlots />} />
                       <Route path="records" element={<BurialRecords />} />
-                      <Route path="settings" element={<AdminSet />} />
-                      {/* Any stray admin path → plots */}
-                      <Route path="*" element={<Navigate to="/admin/plots" replace />} />
-                    </Routes>
-                  </RoleLayout>
-                </PortalGuard>
-              }
-            />
-          </Route>
 
-          {/* Super Admin (protected + guard) */}
-          <Route element={<ProtectedRoute allow={['super_admin']} />}>
-            <Route
-              path="/superadmin/*"
-              element={
-                <PortalGuard allow={["super_admin"]}>
-                  <RoleLayout base="/superadmin">
-                    <Routes>
-                      {/* Default: setup */}
-                      <Route index element={<Navigate to="/superadmin/setup" replace />} />
-                      <Route path="setup" element={<CemeterySetup />} />
-                      <Route path="admin" element={<SuperAdminAdmin />} />
-                      <Route path="staff" element={<SuperAdminStaff />} />
-                      <Route path="visitor" element={<SuperAdminVisitor />} />
-                      {/* Any stray superadmin path → setup */}
-                      <Route path="*" element={<Navigate to="/superadmin/setup" replace />} />
+                      {/* Staff features under admin */}
+                      <Route path="tickets" element={<ViewTickets />} />
+                      <Route path="burials" element={<BurialSchedule />} />
+                      <Route
+                        path="maintenance"
+                        element={<MaintenanceSchedules />}
+                      />
+
+                      {/* Admin settings */}
+                      <Route path="settings" element={<AdminSet />} />
+
+                      {/* Any stray /admin path → plots */}
+                      <Route
+                        path="*"
+                        element={<Navigate to="/admin/plots" replace />}
+                      />
                     </Routes>
                   </RoleLayout>
                 </PortalGuard>
