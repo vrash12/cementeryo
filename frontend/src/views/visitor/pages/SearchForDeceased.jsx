@@ -1,51 +1,182 @@
 // frontend/src/views/visitor/pages/SearchForDeceased.jsx
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { NavLink } from "react-router-dom";
 import fetchBurialRecords from "../js/get-burial-records";
 import {
-  fetchRoadPlots,
   buildGraph,
   buildRoutedPolyline,
   fmtDistance,
 } from "../js/dijkstra-pathfinding";
 
-import "leaflet/dist/leaflet.css";
+import CemeteryMap, {
+  CEMETERY_CENTER,
+  CEMETERY_ENTRANCE,
+  INITIAL_ROAD_SEGMENTS,
+} from "../../../components/map/CemeteryMap";
 
 // shadcn/ui
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import {
-  Card, CardContent, CardHeader, CardTitle, CardDescription,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
 } from "../../../components/ui/card";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
 } from "../../../components/ui/dialog";
 
-// --------------------------- utils: formatting ---------------------------
+// =========================== UI COPY ===========================
+const MEMORIAL_QUOTE = "To live in hearts we leave behind is not to die.";
+
 function formatDate(s) {
   if (!s) return "—";
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return s;
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
+
+  const raw = String(s).trim();
+
+  // ✅ remove "T16:00:00.000Z" (or any ISO time part) if present
+  const dateOnly = raw.includes("T") ? raw.split("T")[0] : raw;
+
+  // If it's "YYYY-MM-DD", parse as LOCAL time to avoid timezone day-shift
+  const isYMD = /^\d{4}-\d{2}-\d{2}$/.test(dateOnly);
+  const d = isYMD ? new Date(`${dateOnly}T00:00:00`) : new Date(raw);
+
+  if (Number.isNaN(d.getTime())) return dateOnly;
+
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  });
+}
+
+function safeFileName(s) {
+  return String(s || "unknown")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+}
+
+// --------------------------- Device API helpers ---------------------------
+function isSecureForDeviceAPIs() {
+  const host = window.location.hostname;
+  return window.isSecureContext || host === "localhost" || host === "127.0.0.1";
+}
+
+function cameraErrToMessage(err) {
+  const name = err?.name || "";
+  if (name === "NotAllowedError")
+    return "Camera permission denied. Please allow camera access in your browser site settings.";
+  if (name === "NotFoundError") return "No camera found on this device.";
+  if (name === "NotReadableError")
+    return "Camera is already in use by another app (e.g., Messenger/Zoom/Camera). Close it and try again.";
+  if (name === "SecurityError")
+    return "Camera access requires HTTPS (or localhost).";
+  return err?.message || "Unable to access camera.";
+}
+
+// --------------------------- plot center fallback ---------------------------
+const API_BASE = import.meta.env.VITE_API_BASE_URL;
+const API_ORIGIN = String(API_BASE || "").replace(/\/api\/?$/, "");
+
+function centerOfGeometry(geom) {
+  if (!geom || !geom.type) return null;
+
+  const pts = [];
+  const walk = (c) => {
+    if (!c) return;
+    if (typeof c[0] === "number" && typeof c[1] === "number") {
+      // GeoJSON coordinate pair [lng, lat]
+      pts.push(c);
+      return;
+    }
+    if (Array.isArray(c)) c.forEach(walk);
+  };
+  walk(geom.coordinates);
+
+  if (!pts.length) return null;
+
+  let minLat = Infinity,
+    maxLat = -Infinity,
+    minLng = Infinity,
+    maxLng = -Infinity;
+
+  for (const [lng, lat] of pts) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+  }
+
+  if (!Number.isFinite(minLat) || !Number.isFinite(minLng)) return null;
+  return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
+}
+
+function resolvePhotoSrc(photoUrl) {
+  if (!photoUrl) return "";
+  const u = String(photoUrl).trim();
+  if (!u) return "";
+  if (/^https?:\/\//i.test(u)) return u;
+  return `${API_ORIGIN}${u.startsWith("/") ? u : `/${u}`}`;
+}
+
+function getPhotoUrlFromAnything(row, qrData) {
+  return (
+    row?.photo_url ||
+    row?.photoUrl ||
+    qrData?.photo_url ||
+    qrData?.photoUrl ||
+    ""
+  );
+}
+
+async function fetchPlotCenterById(plotId) {
+  if (!plotId) return null;
+
+  try {
+    const res = await fetch(
+      `${API_BASE}/plot/${encodeURIComponent(String(plotId))}`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!res.ok) return null;
+
+    const json = await res.json().catch(() => null);
+    const feature = json?.data?.feature || json?.data || json?.feature || json;
+    const geom = feature?.geometry || feature?.geom || null;
+    return centerOfGeometry(geom);
+  } catch (e) {
+    console.warn("fetchPlotCenterById failed:", e);
+    return null;
+  }
 }
 
 // --------------------------- utils: QR parsing ---------------------------
-// Extract lat/lng from MANY token styles: JSON, nested JSON string, URL, geo:, WKT,
-// "lat,lng", "lng,lat", Google Maps @lat,lng,zoom or q=lat,lng, KV pairs, etc.
 function parseLatLngFromToken(token) {
   if (!token) return null;
   const raw = String(token).trim();
 
-  // helper: try parse JSON or nested JSON
   const tryJson = (text) => {
     try {
       const obj = JSON.parse(text);
       if (obj && typeof obj === "object") {
-        // direct lat/lng
         if (Number.isFinite(+obj.lat) && Number.isFinite(+obj.lng)) {
           return { lat: +obj.lat, lng: +obj.lng, data: obj };
         }
-        // search object graph for lat/lng pairs
+        if (Number.isFinite(+obj.latitude) && Number.isFinite(+obj.longitude)) {
+          return { lat: +obj.latitude, lng: +obj.longitude, data: obj };
+        }
+
+        // deep scan
         const stack = [obj];
         while (stack.length) {
           const cur = stack.pop();
@@ -53,13 +184,21 @@ function parseLatLngFromToken(token) {
             if (Number.isFinite(+cur.lat) && Number.isFinite(+cur.lng)) {
               return { lat: +cur.lat, lng: +cur.lng, data: obj };
             }
+            if (
+              Number.isFinite(+cur.latitude) &&
+              Number.isFinite(+cur.longitude)
+            ) {
+              return { lat: +cur.latitude, lng: +cur.longitude, data: obj };
+            }
             for (const v of Object.values(cur)) {
               if (!v) continue;
-              // nested JSON string
-              if (typeof v === "string" && v.trim().startsWith("{") && v.trim().endsWith("}")) {
+              if (
+                typeof v === "string" &&
+                v.trim().startsWith("{") &&
+                v.trim().endsWith("}")
+              ) {
                 try {
-                  const nested = JSON.parse(v);
-                  stack.push(nested);
+                  stack.push(JSON.parse(v));
                 } catch {}
               } else if (typeof v === "object") {
                 stack.push(v);
@@ -72,41 +211,22 @@ function parseLatLngFromToken(token) {
     } catch {}
     return null;
   };
+
   const jsonAttempt = tryJson(raw);
   if (jsonAttempt) return jsonAttempt;
 
-  // geo: URI
   const mGeo = raw.match(/^geo:([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)/i);
   if (mGeo) return { lat: +mGeo[1], lng: +mGeo[2], data: null };
 
-  // Google Maps links:
-  const mQ = raw.match(/[?&](?:q|query)=([+-]?\d+(?:\.\d+)?),\s*([+-]?\d+(?:\.\d+)?)/i);
-  if (mQ) return { lat: +mQ[1], lng: +mQ[2], data: null };
-
-  // https://www.google.com/maps/@lat,lng,18z
-  const mAt = raw.match(/\/@\s*([+-]?\d+(?:\.\d+)?),\s*([+-]?\d+(?:\.\d+)?),/i);
-  if (mAt) return { lat: +mAt[1], lng: +mAt[2], data: null };
-
-  // URL params ?lat=...&lng=...
-  const mUrlLat = raw.match(/[?&]lat=([+-]?\d+(?:\.\d+)?)/i);
-  const mUrlLng = raw.match(/[?&]lng=([+-]?\d+(?:\.\d+)?)/i);
-  if (mUrlLat && mUrlLng) return { lat: +mUrlLat[1], lng: +mUrlLng[1], data: null };
-
-  // KEY:VAL pairs
-  const mKVLat = raw.match(/(?:^|[|,;\s])lat\s*:\s*([+-]?\d+(?:\.\d+)?)(?=$|[|,;\s])/i);
-  const mKVLng = raw.match(/(?:^|[|,;\s])lng\s*:\s*([+-]?\d+(?:\.\d+)?)(?=$|[|,;\s])/i);
-  if (mKVLat && mKVLng) return { lat: +mKVLat[1], lng: +mKVLng[1], data: null };
-
-  // WKT POINT (lng lat)
-  const mPoint = raw.match(/POINT\s*\(\s*([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s*\)/i);
-  if (mPoint) return { lat: +mPoint[2], lng: +mPoint[1], data: null };
-
-  // Plain pair: "lat,lng" or "lng,lat" (decide by range)
-  const mPair = raw.match(/([+-]?\d+(?:\.\d+)?)\s*[,\s]\s*([+-]?\d+(?:\.\d+)?)/);
+  const mPair = raw.match(
+    /([+-]?\d+(?:\.\d+)?)\s*[,\s]\s*([+-]?\d+(?:\.\d+)?)/i
+  );
   if (mPair) {
-    const a = +mPair[1], b = +mPair[2];
+    const a = +mPair[1],
+      b = +mPair[2];
     const looksLikeLatLng = Math.abs(a) <= 90 && Math.abs(b) <= 180;
-    const looksLikeLngLat = Math.abs(a) <= 180 && Math.abs(b) <= 90 && !looksLikeLatLng;
+    const looksLikeLngLat =
+      Math.abs(a) <= 180 && Math.abs(b) <= 90 && !looksLikeLatLng;
     if (looksLikeLatLng) return { lat: a, lng: b, data: null };
     if (looksLikeLngLat) return { lat: b, lng: a, data: null };
     return { lat: a, lng: b, data: null };
@@ -116,114 +236,297 @@ function parseLatLngFromToken(token) {
 }
 
 const QR_LABELS = {
+  person_full_name: "Full Name",
   deceased_name: "Deceased Name",
   birth_date: "Birth Date",
   death_date: "Death Date",
   burial_date: "Burial Date",
 };
-const capitalizeLabelFromKey = (k) => k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+const capitalizeLabelFromKey = (k) =>
+  k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
 const formatQrValue = (key, value) => {
   if (value == null || value === "") return "—";
-  if (key === "lat" || key === "lng") return Number.isFinite(+value) ? (+value).toFixed(6) : String(value);
+  if (key === "lat" || key === "lng")
+    return Number.isFinite(+value) ? (+value).toFixed(6) : String(value);
   if (/(_date$|^created_at$|^updated_at$)/.test(key)) return formatDate(value);
   if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value);
 };
+
+const unwrapRows = (payload) =>
+  Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+    ? payload.data
+    : [];
+
 function qrDisplayEntries(data) {
   const omit = new Set([
-    "_type","id","uid","plot_id","family_contact","is_active","lat","lng",
-    "created_at","updated_at","headstone_type","memorial_text"
+    "_type",
+    "id",
+    "uid",
+    "plot_id",
+    "family_contact",
+    "is_active",
+    "lat",
+    "lng",
+    "created_at",
+    "updated_at",
+    "headstone_type",
+    "memorial_text",
   ]);
   return Object.entries(data)
     .filter(([k]) => !omit.has(k))
-    .map(([k, v]) => ({ key: k, label: QR_LABELS[k] ?? capitalizeLabelFromKey(k), value: formatQrValue(k, v) }));
+    .map(([k, v]) => ({
+      key: k,
+      label: QR_LABELS[k] ?? capitalizeLabelFromKey(k),
+      value: formatQrValue(k, v),
+    }));
 }
 
 // --------------------------- utils: name matching ---------------------------
 const normalizeName = (s) =>
-  String(s || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
+  String(s || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
 function levenshtein(a, b) {
-  a = a || ""; b = b || "";
-  const m = a.length, n = b.length;
-  if (!m) return n; if (!n) return m;
+  a = a || "";
+  b = b || "";
+  const m = a.length,
+    n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
+
   for (let i = 1; i <= m; i++)
     for (let j = 1; j <= n; j++)
-      dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+
   return dp[m][n];
 }
 
 const similarity = (a, b) => {
-  const A = normalizeName(a), B = normalizeName(b);
+  const A = normalizeName(a),
+    B = normalizeName(b);
   if (!A && !B) return 1;
   const dist = levenshtein(A, B);
   return 1 - dist / Math.max(A.length, B.length);
 };
 
-// Keep all Leaflet panes beneath app chrome (Topbar/Sidebar).
-function ensureMapBehindUI(map, z = 0) {
-  const container = map.getContainer();
-  container.style.zIndex = String(z);      // container itself
-  container.style.position = container.style.position || "relative";
+const getDeceasedName = (r) =>
+  (
+    r?.person_full_name ??
+    r?.personFullName ??
+    r?.person_name ??
+    r?.personName ??
+    r?.full_name ??
+    r?.fullName ??
+    r?.name ??
+    ""
+  )
+    .toString()
+    .trim();
 
-  const panes = map.getPanes?.();
-  if (!panes) return;
+/**
+ * "Search Name" = QR token name first,
+ * fallback to DB fields only if QR payload has no name.
+ */
+function nameFromQrToken(qrToken) {
+  const parsed = parseLatLngFromToken(qrToken);
+  const d = parsed?.data;
 
-  // Lower every Leaflet pane
-  panes.mapPane.style.zIndex     = String(z);
-  panes.tilePane.style.zIndex    = String(z);
-  panes.overlayPane.style.zIndex = String(z);
-  panes.markerPane.style.zIndex  = String(z);
-  panes.shadowPane.style.zIndex  = String(z);
-  panes.tooltipPane.style.zIndex = String(z);
-  panes.popupPane.style.zIndex   = String(z);
+  if (!d || typeof d !== "object") return "";
+
+  const byKnownKeys = getDeceasedName(d);
+  if (byKnownKeys) return byKnownKeys;
+
+  const first = (d.first_name ?? d.firstname ?? "").toString().trim();
+  const middle = (d.middle_name ?? d.middlename ?? "").toString().trim();
+  const last = (d.last_name ?? d.lastname ?? "").toString().trim();
+
+  return [first, middle, last].filter(Boolean).join(" ").trim();
 }
 
+function getSearchName(row) {
+  const fromQr = nameFromQrToken(row?.qr_token);
+  if (fromQr) return fromQr;
+  return getDeceasedName(row);
+}
+
+// --------------------------- Static Maps: polyline encode ---------------------------
+function encodePolyline(points) {
+  let lastLat = 0;
+  let lastLng = 0;
+  let result = "";
+
+  const encodeSigned = (num) => {
+    let sgnNum = num << 1;
+    if (num < 0) sgnNum = ~sgnNum;
+    return encodeUnsigned(sgnNum);
+  };
+
+  const encodeUnsigned = (num) => {
+    let out = "";
+    while (num >= 0x20) {
+      out += String.fromCharCode((0x20 | (num & 0x1f)) + 63);
+      num >>= 5;
+    }
+    out += String.fromCharCode(num + 63);
+    return out;
+  };
+
+  for (const p of points) {
+    const lat = Math.round(p.lat * 1e5);
+    const lng = Math.round(p.lng * 1e5);
+
+    const dLat = lat - lastLat;
+    const dLng = lng - lastLng;
+
+    lastLat = lat;
+    lastLng = lng;
+
+    result += encodeSigned(dLat);
+    result += encodeSigned(dLng);
+  }
+
+  return result;
+}
+
+function meanCenter(points) {
+  if (!points?.length) return null;
+  let sLat = 0,
+    sLng = 0;
+  for (const p of points) {
+    sLat += p.lat;
+    sLng += p.lng;
+  }
+  return { lat: sLat / points.length, lng: sLng / points.length };
+}
+
+// --------------------------- Marker icons (SVG data URLs) ---------------------------
+const svgToDataUrl = (svg) =>
+  `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+
+const USER_PIN_SVG = `
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="s" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#0b1220" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <g filter="url(#s)">
+    <path d="M32 4c-10.5 0-19 8.5-19 19 0 15 19 37 19 37s19-22 19-37C51 12.5 42.5 4 32 4z" fill="#0EA5E9"/>
+    <circle cx="32" cy="23" r="9" fill="#ffffff" opacity="0.95"/>
+    <path d="M20 42c3.5-6 20.5-6 24 0" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.95"/>
+  </g>
+</svg>
+`;
+
+const TARGET_PIN_SVG = `
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="s" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#0b1220" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <g filter="url(#s)">
+    <path d="M32 4c-10.5 0-19 8.5-19 19 0 15 19 37 19 37s19-22 19-37C51 12.5 42.5 4 32 4z" fill="#FB7185"/>
+    <circle cx="32" cy="23" r="11" fill="#ffffff" opacity="0.95"/>
+    <circle cx="32" cy="23" r="7" fill="#FB7185" opacity="0.95"/>
+    <circle cx="32" cy="23" r="3" fill="#ffffff" opacity="0.95"/>
+  </g>
+</svg>
+`;
+
+// --------------------------- LOAD PLOTS (GeoJSON) for showing all graves ---------------------------
+function normalizeFeatureCollection(body) {
+  if (!body) return null;
+  if (body?.type === "FeatureCollection") return body;
+  if (body?.data?.type === "FeatureCollection") return body.data;
+  if (body?.data?.data?.type === "FeatureCollection") return body.data.data;
+  return null;
+}
+
+function featureToPath(geom) {
+  if (!geom) return [];
+
+  if (geom.type === "Polygon") {
+    const ring = geom.coordinates?.[0] || [];
+    return ring
+      .map(([lng, lat]) =>
+        Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null
+      )
+      .filter(Boolean);
+  }
+
+  if (geom.type === "MultiPolygon") {
+    const ring = geom.coordinates?.[0]?.[0] || [];
+    return ring
+      .map(([lng, lat]) =>
+        Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null
+      )
+      .filter(Boolean);
+  }
+
+  return [];
+}
 
 // =======================================================================
 // Component
 // =======================================================================
 export default function SearchForDeceased() {
-  // Data and search state
+  const [mode, setMode] = useState("name"); // "name" | "qr"
+
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [nameQuery, setNameQuery] = useState("");  // ✅ single name field
+
+  // ✅ plots/graves for map rendering
+  const [plotsFc, setPlotsFc] = useState(null);
+  const [loadingPlots, setLoadingPlots] = useState(false);
+  const [plotsError, setPlotsError] = useState("");
+
+  const [nameQuery, setNameQuery] = useState("");
+  const [searching, setSearching] = useState(false);
   const [notFoundMsg, setNotFoundMsg] = useState("");
 
-  // results
-  const [results, setResults] = useState([]);       // strong fuzzy matches
-  const [suggestions, setSuggestions] = useState([]); // weaker fuzzy matches
+  const [results, setResults] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
 
-  // Selection and scan
   const [selected, setSelected] = useState(null);
-  const [scanDataForSelected, setScanDataForSelected] = useState(null);
-  const [scanResult, setScanResult] = useState(null); // { token, coords, data }
 
-  // Location and routing state
+  const [scanDataForSelected, setScanDataForSelected] = useState(null);
+  const [scanResult, setScanResult] = useState(null);
+
   const [locationConsent, setLocationConsent] = useState(false);
   const [locationModalOpen, setLocationModalOpen] = useState(false);
   const [userLocation, setUserLocation] = useState(null);
+
   const [graph, setGraph] = useState(null);
+
   const [routeStatus, setRouteStatus] = useState("");
   const [routeDistance, setRouteDistance] = useState(0);
-  const geoWatchIdRef = useRef(null);
+  const [routePath, setRoutePath] = useState([]);
+  const [routeSteps, setRouteSteps] = useState([]);
 
-  // Map
-  const mapRef = useRef(null);
-  const [mapMounted, setMapMounted] = useState(false);
-  const leafletRef = useRef({
-    L: null,
-    map: null,
-    startMarker: null,
-    destMarker: null,
-    routeLine: null
-  });
+  const hasGoodLocationRef = useRef(false);
+
+  const geoWatchIdRef = useRef(null);
   const [mapCoords, setMapCoords] = useState(null);
-  const setMapNode = useCallback((n) => { mapRef.current = n; setMapMounted(!!n); }, []);
 
   // Scan modal
   const [scanModalOpen, setScanModalOpen] = useState(false);
@@ -232,263 +535,400 @@ export default function SearchForDeceased() {
   const videoRef = useRef(null);
   const rafRef = useRef(0);
   const fileRef = useRef(null);
-  const canvasRef = useRef(null); // hidden canvas for jsQR
+  const canvasRef = useRef(null);
 
-  // Default fallback location (cemetery entrance)
-  const DEFAULT_START = { lat: 15.4942139, lng: 120.5547058 };
+  const DEFAULT_START = CEMETERY_ENTRANCE;
+
+  // map instance for UX controls
+  const mapRef = useRef(null);
+  const handleMapLoad = useCallback((map) => {
+    mapRef.current = map;
+  }, []);
 
   // -------------------------- Build graph on mount --------------------------
   useEffect(() => {
     let alive = true;
+
     (async () => {
-      setRouteStatus("Loading cemetery data…");
+      setRouteStatus("Loading cemetery road network…");
       try {
-        const features = await fetchRoadPlots();
+        const inputs = [...INITIAL_ROAD_SEGMENTS];
+        setRouteStatus("Building routing graph (connecting intersections)…");
+
+        const g = buildGraph(inputs, {
+          onlySegments: true,
+          splitIntersections: true,
+          junctionSnapM: 1.5,
+          snapM: 2.5,
+          snapK: 4,
+        });
+
         if (!alive) return;
-        setRouteStatus("Building cemetery graph…");
-        const g = buildGraph(features, { k: 4, maxDist: 80 });
-        if (!alive) return;
+
         setGraph(g);
         setRouteStatus(`Graph ready (${Object.keys(g).length} nodes)`);
       } catch (e) {
-        console.error('Graph building failed:', e);
+        console.error("Graph building failed:", e);
         setRouteStatus("Graph building failed");
       }
     })();
-    return () => { alive = false; };
+
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  // -------------------------- Load burial records ---------------------------
+  // -------------------------- Load burial records --------------------------
   useEffect(() => {
     let ignore = false;
+    const ac = new AbortController();
+
     setLoading(true);
     setError("");
-    fetchBurialRecords()
-      .then((data) => !ignore && setRows(Array.isArray(data) ? data : []))
+
+    fetchBurialRecords({ limit: 2000, offset: 0, signal: ac.signal })
+      .then((payload) => !ignore && setRows(unwrapRows(payload)))
       .catch((e) => !ignore && setError(e.message || "Failed to load"))
       .finally(() => !ignore && setLoading(false));
-    return () => { ignore = true; };
+
+    return () => {
+      ignore = true;
+      ac.abort();
+    };
+  }, []);
+
+  // -------------------------- Load plots/graves GeoJSON --------------------------
+  useEffect(() => {
+    let ignore = false;
+    const ac = new AbortController();
+
+    (async () => {
+      setLoadingPlots(true);
+      setPlotsError("");
+
+      try {
+        const res = await fetch(`${API_BASE}/plot/`, {
+          signal: ac.signal,
+          headers: { Accept: "application/json" },
+        });
+
+        const ct = res.headers.get("content-type") || "";
+        const body = ct.includes("application/json")
+          ? await res.json()
+          : await res.text();
+
+        if (!res.ok) {
+          const msg =
+            typeof body === "string"
+              ? body
+              : body?.message || "Failed to load plots";
+          throw new Error(msg);
+        }
+
+        const fc = normalizeFeatureCollection(body);
+        if (!fc?.features?.length) {
+          throw new Error("Plots loaded but no features returned.");
+        }
+
+        if (!ignore) setPlotsFc(fc);
+      } catch (e) {
+        if (!ignore) setPlotsError(e?.message || "Failed to load plots.");
+      } finally {
+        if (!ignore) setLoadingPlots(false);
+      }
+    })();
+
+    return () => {
+      ignore = true;
+      ac.abort();
+    };
   }, []);
 
   // -------------------------- Location permission ---------------------------
+  // Ask only when we have a destination and still no start
   useEffect(() => {
-    if (mapCoords && !locationConsent) {
-      setLocationModalOpen(true);
-    }
-  }, [mapCoords, locationConsent]);
+    if (!mapCoords) return;
+    if (!userLocation && !locationConsent) setLocationModalOpen(true);
+  }, [mapCoords, userLocation, locationConsent]);
 
-  const requestUserLocation = useCallback(async () => {
+  const requestUserLocation = useCallback(() => {
     setLocationConsent(true);
     setLocationModalOpen(false);
 
+    hasGoodLocationRef.current = false;
+
+    setUserLocation(null);
+    setRouteStatus("Requesting your location…");
+
     if (!("geolocation" in navigator)) {
-      console.warn("Geolocation not available, using default start location");
       setUserLocation(DEFAULT_START);
+      setRouteStatus(
+        "Geolocation not supported. Starting from cemetery entrance."
+      );
+      return;
+    }
+
+    if (!isSecureForDeviceAPIs()) {
+      setUserLocation(DEFAULT_START);
+      setRouteStatus(
+        "Location blocked by browser (needs HTTPS or localhost). Starting from cemetery entrance."
+      );
       return;
     }
 
     const onSuccess = (position) => {
-      const { latitude, longitude } = position.coords;
-      const location = { lat: latitude, lng: longitude };
-      setUserLocation(location);
+      const { latitude, longitude, accuracy } = position.coords;
+      hasGoodLocationRef.current = true;
+      const loc = { lat: latitude, lng: longitude };
+      setUserLocation(loc);
+      setRouteStatus(`Location acquired ✅ (±${Math.round(accuracy || 0)}m)`);
     };
-    const onError = (error) => {
-      console.warn("Geolocation error:", error);
-      setUserLocation(DEFAULT_START);
+
+    const onError = (err) => {
+      console.warn("Geolocation error:", err);
+
+      const code = err?.code;
+      const msg =
+        code === 1
+          ? "Location permission denied."
+          : code === 2
+          ? "Location unavailable. Turn on GPS / Location Services and try again."
+          : code === 3
+          ? "Location timed out. Try again (better signal) or use the entrance."
+          : "Could not get your location.";
+
+      if (!hasGoodLocationRef.current) {
+        setUserLocation(DEFAULT_START);
+        setRouteStatus(`${msg} Starting from cemetery entrance.`);
+      } else {
+        setRouteStatus("Location updates stopped. Using last known location.");
+      }
     };
 
     try {
       navigator.geolocation.getCurrentPosition(onSuccess, onError, {
-        enableHighAccuracy: true, timeout: 10000, maximumAge: 60000
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0,
       });
 
       if (geoWatchIdRef.current) {
         navigator.geolocation.clearWatch(geoWatchIdRef.current);
       }
-      geoWatchIdRef.current = navigator.geolocation.watchPosition(onSuccess, onError, {
-        enableHighAccuracy: true, timeout: 20000, maximumAge: 60000
-      });
+
+      geoWatchIdRef.current = navigator.geolocation.watchPosition(
+        onSuccess,
+        (err) => {
+          console.warn("watchPosition error:", err);
+          if (!hasGoodLocationRef.current) onError(err);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 20000,
+          maximumAge: 0,
+        }
+      );
     } catch (e) {
-      console.error("Geolocation setup failed:", e);
+      console.warn("Geolocation threw:", e);
       setUserLocation(DEFAULT_START);
+      setRouteStatus("Location failed. Starting from cemetery entrance.");
     }
-  }, []);
+  }, [DEFAULT_START]);
+
   const useDefaultLocation = useCallback(() => {
     setLocationConsent(true);
     setLocationModalOpen(false);
     setUserLocation(DEFAULT_START);
-  }, []);
+    if (!routeStatus) setRouteStatus("Starting route from cemetery entrance.");
+  }, [DEFAULT_START, routeStatus]);
+
   useEffect(() => {
     return () => {
-      if (geoWatchIdRef.current) navigator.geolocation.clearWatch(geoWatchIdRef.current);
+      if (geoWatchIdRef.current)
+        navigator.geolocation.clearWatch(geoWatchIdRef.current);
     };
   }, []);
 
-  // ------------------------------- Map init --------------------------------
+  // -------------------------- Compute / update route ------------------------
   useEffect(() => {
     let cancelled = false;
-    if (!mapMounted || !mapCoords || !userLocation || !graph) return;
+
+    if (!mapCoords || !userLocation || !graph) return;
 
     (async () => {
-      if (!leafletRef.current.L) {
-        const mod = await import("leaflet");
-        leafletRef.current.L = mod.default || mod;
-      }
-      const L = leafletRef.current.L;
-      if (cancelled) return;
-
-      if (leafletRef.current.map) {
-        leafletRef.current.map.remove();
-      }
-
-      const map = L.map(mapRef.current).setView([mapCoords.lat, mapCoords.lng], 17);
-      leafletRef.current.map = map;
-
-      ensureMapBehindUI(map, 0);
-
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 20,
-        attribution: "&copy; OpenStreetMap"
-      }).addTo(map);
-
-      leafletRef.current.destMarker = L.marker([mapCoords.lat, mapCoords.lng], {
-        icon: L.divIcon({ html: "🎯", iconSize: [20, 20], className: "destination-marker" }),
-      }).addTo(map).bindPopup("Grave Location");
-
-      leafletRef.current.startMarker = L.circleMarker([userLocation.lat, userLocation.lng], {
-        radius: 8, color: "#0ea5e9", weight: 3, fillOpacity: 0.8,
-      }).addTo(map).bindPopup("Your Location");
-
       try {
-        setRouteStatus("Computing optimal route…");
-        const { polyline, distance } = await buildRoutedPolyline(
-          userLocation, mapCoords, graph, { userM: 25, destM: 25 }
-        );
-        if (!cancelled) {
-          if (!polyline.length) {
-            setRouteStatus("No route found");
-            return;
+        setRouteStatus("Computing route along cemetery roads…");
+        setRouteDistance(0);
+        setRoutePath([]);
+        setRouteSteps([]);
+
+        const { polyline, distance, steps, debug } = await buildRoutedPolyline(
+          userLocation,
+          mapCoords,
+          graph,
+          {
+            userM: 25,
+            destM: 25,
+            snapMaxM: 80,
+            allowFallback: false,
           }
-          setRouteDistance(distance);
-          if (leafletRef.current.routeLine) map.removeLayer(leafletRef.current.routeLine);
-          leafletRef.current.routeLine = L.polyline(polyline, {
-            weight: 4, opacity: 0.9, color: "#059669", smoothFactor: 1.0,
-          }).addTo(map);
-          const bounds = L.latLngBounds(polyline);
-          map.fitBounds(bounds, { padding: [20, 20] });
-          setRouteStatus("Route computed");
-        }
-      } catch (e) {
-        console.error("Route computation failed:", e);
-        setRouteStatus("Route computation failed");
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [mapMounted, mapCoords, userLocation, graph]);
-
-  // Recompute route on location changes
-  useEffect(() => {
-    if (!leafletRef.current.map || !mapCoords || !userLocation || !graph) return;
-    const L = leafletRef.current.L;
-    const map = leafletRef.current.map;
-
-    if (leafletRef.current.startMarker) {
-      leafletRef.current.startMarker.setLatLng([userLocation.lat, userLocation.lng]);
-    }
-
-    (async () => {
-      try {
-        setRouteStatus("Updating route…");
-        const { polyline, distance } = await buildRoutedPolyline(
-          userLocation, mapCoords, graph, { userM: 25, destM: 25 }
         );
-        if (!polyline.length) {
-          setRouteStatus("No route found");
+
+        if (cancelled) return;
+
+        if (!polyline?.length) {
+          console.warn("No route polyline. Debug:", debug);
+          setRouteStatus("No road route found to that grave.");
+          setRouteSteps([]);
           return;
         }
-        setRouteDistance(distance);
-        if (leafletRef.current.routeLine) map.removeLayer(leafletRef.current.routeLine);
-        leafletRef.current.routeLine = L.polyline(polyline, {
-          weight: 4, opacity: 0.9, color: "#059669", smoothFactor: 1.0,
-        }).addTo(map);
-        setRouteStatus("Route updated");
+
+        setRouteDistance(distance || 0);
+        setRoutePath(polyline);
+        setRouteSteps(Array.isArray(steps) ? steps : []);
+        setRouteStatus("Route ready ✅");
       } catch (e) {
-        console.error("Route update failed:", e);
-        setRouteStatus("Route update failed");
+        console.error("Route computation failed:", e);
+        if (!cancelled) setRouteStatus("Route computation failed");
       }
     })();
-  }, [userLocation, mapCoords, graph]);
 
-  useEffect(() => {
     return () => {
-      if (leafletRef.current.map) {
-        try { leafletRef.current.map.remove(); } catch {}
-      }
+      cancelled = true;
     };
-  }, []);
+  }, [mapCoords, userLocation, graph]);
 
-  // ------------------------- Search form handlers --------------------------
-  function onSubmit(e) {
-    e.preventDefault();
-    setScanResult(null);
+  // ------------------------- Helpers: reset UI state ------------------------
+  const resetAll = useCallback(() => {
     setNotFoundMsg("");
     setResults([]);
     setSuggestions([]);
     setSelected(null);
     setScanDataForSelected(null);
+    setScanResult(null);
     setMapCoords(null);
+    setRoutePath([]);
+    setRouteDistance(0);
+    setRouteSteps([]);
+    setRouteStatus("");
+  }, []);
 
-    const q = nameQuery.trim();
-    if (!q) {
-      setNotFoundMsg("Please enter a name to search.");
-      return;
-    }
+  const switchMode = useCallback(
+    (m) => {
+      setMode(m);
+      resetAll();
+    },
+    [resetAll]
+  );
 
-    const availableRows = rows.filter((r) => (r.deceased_name || "").trim().length > 0);
-    if (!availableRows.length) {
-      setNotFoundMsg("No burial records are available.");
-      return;
-    }
+  // ------------------------- Search (server first) --------------------------
+  const onSubmit = useCallback(
+    async (e) => {
+      e.preventDefault();
 
-    // Fuzzy match on full name only (single query string)
-    const withScores = availableRows
-      .map((r) => ({
-        row: r,
-        score: similarity(q, r.deceased_name || ""),
-      }))
-      .sort((a, b) => b.score - a.score);
+      resetAll();
 
-    const STRONG = 0.70;   // results threshold
-    const WEAK_MIN = 0.40; // suggestions lower bound
+      const q = nameQuery.trim();
+      if (!q) {
+        setNotFoundMsg("Please enter a name to search.");
+        return;
+      }
 
-    const strong = withScores.filter(({ score }) => score >= STRONG).map(({ row }) => row);
-    const weak   = withScores.filter(({ score }) => score >= WEAK_MIN && score < STRONG).map(({ row }) => row);
+      setSearching(true);
 
-    if (!strong.length && !weak.length) {
-      setNotFoundMsg("No records found with a similar name.");
-    }
+      let baseRows = [];
+      try {
+        const payload = await fetchBurialRecords({
+          query: q,
+          q,
+          limit: 250,
+          offset: 0,
+        });
+        const apiRows = unwrapRows(payload);
+        if (apiRows.length) baseRows = apiRows;
+      } catch (err) {
+        console.warn("Search API failed; using cached rows:", err);
+      }
 
-    setResults(strong);
-    setSuggestions(weak);
+      if (!baseRows.length) baseRows = Array.isArray(rows) ? rows : [];
 
-    if (strong.length === 1) handleSelect(strong[0]);
-  }
+      if (!baseRows.length) {
+        setNotFoundMsg("No burial records returned from the server.");
+        setSearching(false);
+        return;
+      }
 
-  function handleSelect(row) {
+      const availableRows = baseRows.filter((r) => getSearchName(r).length > 0);
+
+      if (!availableRows.length) {
+        setNotFoundMsg(
+          "Records were returned, but no usable name was found in QR token or record fields."
+        );
+        setSearching(false);
+        return;
+      }
+
+      const withScores = availableRows
+        .map((r) => ({ row: r, score: similarity(q, getSearchName(r)) }))
+        .sort((a, b) => b.score - a.score);
+
+      const STRONG = 0.7;
+      const WEAK_MIN = 0.4;
+
+      const strong = withScores
+        .filter(({ score }) => score >= STRONG)
+        .map(({ row }) => row);
+
+      const weak = withScores
+        .filter(({ score }) => score >= WEAK_MIN && score < STRONG)
+        .map(({ row }) => row);
+
+      if (!strong.length && !weak.length) {
+        setNotFoundMsg("No records found with a similar name.");
+      }
+
+      setResults(strong);
+      setSuggestions(weak);
+
+      if (strong.length === 1) {
+        await handleSelect(strong[0]);
+      }
+
+      setSearching(false);
+    },
+    [nameQuery, rows, resetAll]
+  );
+
+  // handleSelect supports QR missing coords by fetching plot center
+  async function handleSelect(row) {
     setScanResult(null);
     setSelected(row || null);
 
     const parsed = parseLatLngFromToken(row?.qr_token);
-    const coords = parsed && Number.isFinite(parsed.lat) && Number.isFinite(parsed.lng)
-      ? { lat: parsed.lat, lng: parsed.lng }
-      : null;
 
-    setScanDataForSelected(parsed?.data && typeof parsed.data === "object" ? parsed.data : null);
+    let coords =
+      parsed && Number.isFinite(parsed.lat) && Number.isFinite(parsed.lng)
+        ? { lat: parsed.lat, lng: parsed.lng }
+        : null;
+
+    if (!coords && row?.plot_id) {
+      coords = await fetchPlotCenterById(row.plot_id);
+    }
+
+    setScanDataForSelected(
+      parsed?.data && typeof parsed.data === "object" ? parsed.data : null
+    );
+
     setMapCoords(coords);
+
+    if (!coords) {
+      setRouteStatus(
+        "Selected record has no location (no lat/lng and plot lookup failed)."
+      );
+    }
   }
 
-  // ------------------------- QR: 3-tier decoding ---------------------------
+  // ------------------------- QR -------------------------
   function closeScanModal() {
     stopCamera();
     setScanErr("");
@@ -499,79 +939,139 @@ export default function SearchForDeceased() {
   async function startCamera() {
     setScanErr("");
     setScanMode("camera");
+
+    if (!isSecureForDeviceAPIs()) {
+      setScanModalOpen(true);
+      setScanErr(
+        "Camera is blocked on this site. Use HTTPS (or localhost) to enable camera access."
+      );
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScanModalOpen(true);
+      setScanErr(
+        "Your browser does not support camera access (getUserMedia missing)."
+      );
+      return;
+    }
+
+    let stream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
           height: { ideal: 720 },
-        }
+        },
+        audio: false,
       });
-      const v = videoRef.current;
-      if (!v) return;
-      v.srcObject = stream;
+    } catch (err) {
+      setScanModalOpen(true);
+      setScanErr(cameraErrToMessage(err));
+      return;
+    }
+
+    setScanModalOpen(true);
+
+    await new Promise((r) => requestAnimationFrame(r));
+
+    const v = videoRef.current;
+    if (!v) {
+      stream.getTracks().forEach((t) => t.stop());
+      setScanErr("Scanner UI did not initialize. Please try again.");
+      return;
+    }
+
+    v.srcObject = stream;
+    try {
       await v.play();
+    } catch {}
 
-      // 1) Native BarcodeDetector live
-      let barcodeDetector = null;
-      if ("BarcodeDetector" in window) {
-        try {
-          const formats = await window.BarcodeDetector.getSupportedFormats?.();
-          if (!formats || formats.includes("qr_code")) {
-            barcodeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
-          }
-        } catch {}
-      }
+    let barcodeDetector = null;
+    if ("BarcodeDetector" in window) {
+      try {
+        const formats = await window.BarcodeDetector.getSupportedFormats?.();
+        if (!formats || formats.includes("qr_code")) {
+          barcodeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        }
+      } catch {}
+    }
 
-      const tick = async () => {
-        try {
-          if (barcodeDetector) {
-            const codes = await barcodeDetector.detect(v);
-            if (codes && codes.length) {
-              handleQrFound(codes[0].rawValue || "");
-              return;
-            }
-          }
+    let jsQRFn = null;
+    try {
+      const mod = await import("jsqr");
+      jsQRFn = mod.default;
+    } catch {}
 
-          // 2) jsQR on a canvas
-          const canvas = canvasRef.current || (canvasRef.current = document.createElement("canvas"));
-          const cw = Math.min(1024, v.videoWidth || 640);
-          const ch = Math.floor((cw / (v.videoWidth || 640)) * (v.videoHeight || 480));
-          canvas.width = cw;
-          canvas.height = ch;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          ctx.drawImage(v, 0, 0, cw, ch);
-          const imageData = ctx.getImageData(0, 0, cw, ch);
+    const tick = async () => {
+      try {
+        const vv = videoRef.current;
+        if (!vv) return;
 
-          const { default: jsQR } = await import("jsqr");
-          const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "attemptBoth" });
-          if (code && code.data) {
-            handleQrFound(code.data);
+        if (barcodeDetector) {
+          const codes = await barcodeDetector.detect(vv);
+          if (codes?.length) {
+            await handleQrFound(codes[0].rawValue || "");
             return;
           }
-        } catch {}
-        rafRef.current = requestAnimationFrame(tick);
-      };
+        }
+
+        if (jsQRFn) {
+          const canvas =
+            canvasRef.current ||
+            (canvasRef.current = document.createElement("canvas"));
+
+          const vw = vv.videoWidth || 640;
+          const vh = vv.videoHeight || 480;
+
+          const cw = Math.min(1024, vw);
+          const ch = Math.floor((cw / vw) * vh);
+
+          canvas.width = cw;
+          canvas.height = ch;
+
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          ctx.drawImage(vv, 0, 0, cw, ch);
+          const imageData = ctx.getImageData(0, 0, cw, ch);
+
+          const code = jsQRFn(
+            imageData.data,
+            imageData.width,
+            imageData.height,
+            {
+              inversionAttempts: "attemptBoth",
+            }
+          );
+
+          if (code?.data) {
+            await handleQrFound(code.data);
+            return;
+          }
+        }
+      } catch {}
+
       rafRef.current = requestAnimationFrame(tick);
-    } catch {
-      setScanErr("Unable to access camera.");
-    }
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
   }
 
   function stopCamera() {
     cancelAnimationFrame(rafRef.current);
     const v = videoRef.current;
-    if (v?.srcObject) {
-      v.srcObject.getTracks?.().forEach((t) => t.stop?.());
-      v.srcObject = null;
-    }
+    const stream = v?.srcObject;
+
+    if (stream?.getTracks) stream.getTracks().forEach((t) => t.stop());
+    if (v) v.srcObject = null;
   }
 
-  // Decode from uploaded image using: BarcodeDetector → ZXing → jsQR
   async function handleUploadFile(file) {
     if (!file) return;
+
     setScanErr("");
     setScanMode("upload");
+    setScanModalOpen(true);
 
     const url = URL.createObjectURL(file);
     const cleanup = () => URL.revokeObjectURL(url);
@@ -581,11 +1081,12 @@ export default function SearchForDeceased() {
       const canvas = document.createElement("canvas");
       const cw = Math.min(1600, bmp.width);
       const ch = Math.floor((cw / bmp.width) * bmp.height);
-      canvas.width = cw; canvas.height = ch;
+      canvas.width = cw;
+      canvas.height = ch;
+
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(bmp, 0, 0, cw, ch);
 
-      // 1) BarcodeDetector
       if ("BarcodeDetector" in window) {
         try {
           const supported = await window.BarcodeDetector.getSupportedFormats?.();
@@ -593,7 +1094,7 @@ export default function SearchForDeceased() {
             const det = new window.BarcodeDetector({ formats: ["qr_code"] });
             const codes = await det.detect(canvas);
             if (codes?.length) {
-              handleQrFound(codes[0].rawValue || "");
+              await handleQrFound(codes[0].rawValue || "");
               cleanup();
               return;
             }
@@ -601,25 +1102,25 @@ export default function SearchForDeceased() {
         } catch {}
       }
 
-      // 2) ZXing
       try {
         const { BrowserQRCodeReader } = await import("@zxing/browser");
         const z = new BrowserQRCodeReader();
         const res = await z.decodeFromImageUrl(url);
         if (res?.getText) {
-          handleQrFound(res.getText());
+          await handleQrFound(res.getText());
           cleanup();
           return;
         }
       } catch {}
 
-      // 3) jsQR
       try {
         const imageData = ctx.getImageData(0, 0, cw, ch);
         const { default: jsQR } = await import("jsqr");
-        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "attemptBoth" });
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: "attemptBoth",
+        });
         if (code && code.data) {
-          handleQrFound(code.data);
+          await handleQrFound(code.data);
           cleanup();
           return;
         }
@@ -630,47 +1131,108 @@ export default function SearchForDeceased() {
       setScanErr(e?.message || "Failed to decode QR image.");
     } finally {
       cleanup();
+      setTimeout(() => setScanMode("choose"), 250);
     }
   }
 
-  function handleQrFound(text) {
+  async function handleQrFound(text) {
     stopCamera();
     setScanModalOpen(false);
-    setSelected(null);
-    setScanDataForSelected(null);
+    setScanErr("");
+    setScanMode("choose");
+
+    resetAll();
+    setMode("qr");
 
     const parsed = parseLatLngFromToken(text);
-    const coords = parsed && Number.isFinite(parsed.lat) && Number.isFinite(parsed.lng)
-      ? { lat: parsed.lat, lng: parsed.lng }
-      : null;
+
+    let coords =
+      parsed && Number.isFinite(parsed.lat) && Number.isFinite(parsed.lng)
+        ? { lat: parsed.lat, lng: parsed.lng }
+        : null;
+
+    const plotIdFromQr =
+      parsed?.data && typeof parsed.data === "object"
+        ? parsed.data.plot_id ?? parsed.data.plotId ?? null
+        : null;
+
+    let pool = Array.isArray(rows) ? rows : [];
+    let matchedRow = null;
+
+    if (plotIdFromQr != null) {
+      matchedRow =
+        pool.find((r) => String(r.plot_id) === String(plotIdFromQr)) || null;
+
+      if (!matchedRow) {
+        try {
+          const morePayload = await fetchBurialRecords({
+            limit: 5000,
+            offset: 0,
+          });
+          const moreRows = unwrapRows(morePayload);
+
+          if (moreRows.length) {
+            setRows(moreRows);
+            pool = moreRows;
+
+            matchedRow =
+              pool.find((r) => String(r.plot_id) === String(plotIdFromQr)) ||
+              null;
+          }
+        } catch (e) {
+          console.warn("Could not refresh records for QR match:", e);
+        }
+      }
+
+      if (matchedRow) setSelected(matchedRow);
+    }
+
+    if (!coords && plotIdFromQr) coords = await fetchPlotCenterById(plotIdFromQr);
 
     setMapCoords(coords);
-    setScanResult({ token: text, coords, data: parsed?.data || null });
+
+    setScanDataForSelected(
+      parsed?.data && typeof parsed.data === "object" ? parsed.data : null
+    );
+
+    setScanResult({
+      token: text,
+      coords,
+      data: parsed?.data || null,
+      plot_id: plotIdFromQr ?? null,
+      matchedRow: matchedRow || null,
+    });
+
+    if (!coords) {
+      setRouteStatus(
+        "QR scanned, but no location found (no lat/lng and plot lookup failed)."
+      );
+    }
   }
 
   // ----------------------------- Result card ------------------------------
   function RecordCard({ row, onPick }) {
-    const parsed = parseLatLngFromToken(row?.qr_token);
-    const hasCoords = parsed && Number.isFinite(parsed.lat) && Number.isFinite(parsed.lng);
-
+    const name = getSearchName(row) || "Unnamed";
     return (
       <div className="relative">
-        {/* backdrop shadow */}
-        <div className="absolute -inset-2 bg-gradient-to-br from-violet-400/20 via-purple-400/15 to-indigo-400/20 rounded-xl blur-xl opacity-30" />
-
-        <Card className="group relative overflow-hidden border-white/60 dark:border-white/10 bg-white/80 dark:bg-white/5 backdrop-blur supports-[backdrop-filter]:bg-white/40 shadow-md hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
-          {/* backdrop gradient */}
-          <div className="absolute inset-0 bg-gradient-to-br from-violet-400/20 via-purple-400/15 to-indigo-400/20" />
-
+        <div className="absolute -inset-2 bg-gradient-to-br from-emerald-400/20 via-cyan-400/15 to-blue-400/20 rounded-2xl blur-xl opacity-25" />
+        <Card className="group relative overflow-hidden border-white/60 dark:border-white/10 bg-white/85 dark:bg-white/5 backdrop-blur supports-[backdrop-filter]:bg-white/40 shadow-md hover:shadow-xl transition-all duration-300 hover:-translate-y-1 rounded-2xl">
+          <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/10 via-cyan-400/10 to-blue-400/10" />
           <CardHeader className="relative pb-2">
-            <CardDescription className="text-slate-700 font-medium">
-              {row.deceased_name ? row.deceased_name : "Unnamed"} · Born {formatDate(row.birth_date)} · Died {formatDate(row.death_date)}
+            <CardTitle className="text-base text-slate-900 flex items-center justify-between gap-3">
+              <span className="truncate">{name}</span>
+              <span className="shrink-0 rounded-full border bg-white/80 px-2.5 py-1 text-[11px] text-slate-700">
+                Plot: {row?.plot_id ?? "—"}
+              </span>
+            </CardTitle>
+            <CardDescription className="text-slate-600">
+              Born {formatDate(row?.birth_date)} · Died{" "}
+              {formatDate(row?.death_date)}
             </CardDescription>
           </CardHeader>
-          <CardContent className="relative flex items-center justify-between gap-4">
-            <div className="text-sm text-slate-600" />
-            <Button size="sm" onClick={() => onPick?.(row)} className="shadow-md hover:shadow-lg">
-              View details {hasCoords ? "and location" : ""}
+          <CardContent className="relative flex items-center justify-end gap-3">
+            <Button size="sm" onClick={() => onPick?.(row)} className="shadow-md">
+              View on map
             </Button>
           </CardContent>
         </Card>
@@ -678,12 +1240,260 @@ export default function SearchForDeceased() {
     );
   }
 
+  // --------------------------- Map props -------------------
+  const mapMarkers = useMemo(() => {
+    const list = [];
+    if (userLocation) {
+      list.push({
+        id: "user",
+        position: userLocation,
+        title: "Your Location",
+        iconType: "user",
+        icon: svgToDataUrl(USER_PIN_SVG),
+        zIndex: 1000,
+      });
+    }
+    if (mapCoords) {
+      list.push({
+        id: "dest",
+        position: mapCoords,
+        title: "Grave Location",
+        iconType: "target",
+        icon: svgToDataUrl(TARGET_PIN_SVG),
+        zIndex: 1001,
+      });
+    }
+    return list;
+  }, [userLocation, mapCoords]);
+
+  const mapPolylines = useMemo(() => {
+    if (!routePath?.length) return [];
+    return [
+      {
+        id: "route",
+        path: routePath,
+        options: {
+          strokeColor: "#059669",
+          strokeOpacity: 0.95,
+          strokeWeight: 4,
+          zIndex: 999,
+        },
+      },
+    ];
+  }, [routePath]);
+
+  // ✅ Build polygons from plots FeatureCollection (THIS MAKES GRAVES SHOW)
+  const selectedPlotId = useMemo(() => {
+    return (
+      selected?.plot_id ??
+      scanResult?.plot_id ??
+      scanResult?.matchedRow?.plot_id ??
+      null
+    );
+  }, [selected, scanResult]);
+
+  const plotPolygons = useMemo(() => {
+    const features = plotsFc?.features || [];
+    if (!features.length) return [];
+
+    return features
+      .map((f) => {
+        const props = f.properties || {};
+        const path = featureToPath(f.geometry);
+        if (path.length < 3) return null;
+
+        const id =
+          props.id != null ? String(props.id) : props.uid ? String(props.uid) : undefined;
+
+        const statusRaw = String(props.status || "").trim().toLowerCase();
+        let color = "#10b981"; // available
+        if (statusRaw === "reserved") color = "#f59e0b";
+        else if (statusRaw === "occupied") color = "#ef4444";
+
+        const isSelected =
+          selectedPlotId != null &&
+          props.id != null &&
+          String(props.id) === String(selectedPlotId);
+
+        const baseOptions = {
+          strokeColor: color,
+          fillColor: color,
+          strokeOpacity: 1,
+          strokeWeight: 1.2,
+          fillOpacity: 0.35,
+          zIndex: 10,
+        };
+
+        const selectedOptions = isSelected
+          ? {
+              strokeColor: "#2563eb",
+              fillColor: "#60a5fa",
+              strokeWeight: 4,
+              fillOpacity: 0.6,
+              zIndex: 999,
+            }
+          : {};
+
+        return {
+          ...props, // keep plot_name, uid, price, size_sqm, etc.
+          id,
+          status: props.status,
+          path,
+          options: { ...baseOptions, ...selectedOptions },
+        };
+      })
+      .filter(Boolean);
+  }, [plotsFc, selectedPlotId]);
+
+  const hasDetailsOpen = !!selected || !!scanResult;
+  const routeReady = routePath?.length > 0 && mapCoords && userLocation;
+
+  const photoSrc = resolvePhotoSrc(
+    getPhotoUrlFromAnything(
+      selected || scanResult?.matchedRow,
+      scanDataForSelected || scanResult?.data
+    )
+  );
+
+  const deceasedNameResolved =
+    getSearchName(selected) ||
+    getSearchName(scanResult?.matchedRow) ||
+    scanDataForSelected?.person_full_name ||
+    scanResult?.data?.person_full_name ||
+    scanDataForSelected?.deceased_name ||
+    scanResult?.data?.deceased_name ||
+    "Unknown";
+
+  // --------------------------- Download route as IMAGE -------------------
+  const GOOGLE_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+  const downloadRouteImage = useCallback(async () => {
+    if (!routeReady) return;
+
+    try {
+      if (!GOOGLE_KEY) {
+        setRouteStatus(
+          "Missing Google Maps API key (VITE_GOOGLE_MAPS_API_KEY)."
+        );
+        return;
+      }
+
+      setRouteStatus("Preparing route image download…");
+
+      const center = meanCenter(routePath) || mapCoords || CEMETERY_CENTER;
+      const enc = encodePolyline(routePath);
+
+      const size = "900x900";
+      const scale = 2;
+
+      const mUser = `color:0x0ea5e9|label:U|${userLocation.lat},${userLocation.lng}`;
+      const mTarget = `color:0xfb7185|label:T|${mapCoords.lat},${mapCoords.lng}`;
+      const path = `weight:6|color:0x059669|enc:${enc}`;
+
+      const styles = [
+        "feature:all|element:labels|visibility:off",
+        "feature:landscape|element:geometry|color:0xffffff",
+        "feature:landscape.natural|element:geometry|color:0xffffff",
+        "feature:landscape.man_made|element:geometry|color:0xffffff",
+        "feature:water|element:geometry|color:0xffffff",
+        "feature:poi|visibility:off",
+        "feature:transit|visibility:off",
+      ];
+      const styleParams = styles
+        .map((s) => `&style=${encodeURIComponent(s)}`)
+        .join("");
+
+      const url =
+        "https://maps.googleapis.com/maps/api/staticmap" +
+        `?center=${center.lat},${center.lng}` +
+        `&zoom=19` +
+        `&size=${size}` +
+        `&scale=${scale}` +
+        `&maptype=roadmap` +
+        `&markers=${encodeURIComponent(mUser)}` +
+        `&markers=${encodeURIComponent(mTarget)}` +
+        `&path=${encodeURIComponent(path)}` +
+        styleParams +
+        `&key=${encodeURIComponent(GOOGLE_KEY)}`;
+
+      const res = await fetch(url);
+      if (!res.ok) {
+        setRouteStatus(
+          "Image download failed. Make sure Google Static Maps API is enabled for your key."
+        );
+        return;
+      }
+
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = `route_${safeFileName(deceasedNameResolved)}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      setRouteStatus("Route image downloaded ✅");
+    } catch (e) {
+      console.error(e);
+      setRouteStatus(
+        "Image download failed. Please check API key & Static Maps API."
+      );
+    }
+  }, [
+    routeReady,
+    routePath,
+    mapCoords,
+    userLocation,
+    deceasedNameResolved,
+    GOOGLE_KEY,
+  ]);
+
+  // UX controls
+  const fitCemetery = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.panTo(CEMETERY_CENTER);
+    map.setZoom(17);
+  }, []);
+
+  const fitRoute = useCallback(() => {
+    const g = window.google?.maps;
+    const map = mapRef.current;
+    if (!g || !map) return;
+
+    const bounds = new g.LatLngBounds();
+    if (userLocation) bounds.extend(userLocation);
+    if (mapCoords) bounds.extend(mapCoords);
+    if (Array.isArray(routePath)) routePath.forEach((p) => bounds.extend(p));
+
+    try {
+      map.fitBounds(bounds, 60);
+    } catch {}
+  }, [userLocation, mapCoords, routePath]);
+
+  const centerToYou = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !userLocation) return;
+    map.panTo(userLocation);
+    map.setZoom(19);
+  }, [userLocation]);
+
+  const centerToGrave = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !mapCoords) return;
+    map.panTo(mapCoords);
+    map.setZoom(19);
+  }, [mapCoords]);
+
   // =======================================================================
   // UI
   // =======================================================================
   return (
     <div className="relative min-h-screen font-poppins">
-      {/* global backdrop */}
+      {/* Backdrop */}
       <div aria-hidden className="pointer-events-none fixed inset-0 -z-10">
         <div className="absolute inset-0 bg-gradient-to-br from-emerald-100 via-cyan-50 to-blue-100" />
         <div className="absolute -top-24 -left-24 h-[32rem] w-[32rem] rounded-full bg-emerald-300/50 blur-3xl dark:bg-emerald-500/10" />
@@ -694,99 +1504,197 @@ export default function SearchForDeceased() {
       {/* Header */}
       <section className="pt-24 pb-8">
         <div className="mx-auto w-full max-w-7xl px-6 lg:px-8">
-          <div className="mb-2 text-sm text-slate-500">
-            <NavLink to="/" className="hover:text-slate-700">Home</NavLink>
-            &nbsp;›&nbsp;<span className="text-slate-700">Search For Deceased</span>
+          <div className="mb-3 text-sm text-slate-500">
+            <NavLink to="/" className="hover:text-slate-700">
+              Home
+            </NavLink>
+            &nbsp;›&nbsp;
+            <span className="text-slate-700">Search For Deceased</span>
           </div>
 
           <div className="relative">
-            {/* backdrop shadow */}
-            <div className="absolute -inset-2 bg-gradient-to-br from-emerald-400/25 via-cyan-400/20 to-blue-400/25 rounded-2xl blur-xl opacity-40" />
+            <div className="absolute -inset-2 bg-gradient-to-br from-emerald-400/25 via-cyan-400/20 to-blue-400/25 rounded-3xl blur-xl opacity-40" />
 
-            <Card className="relative overflow-hidden border-white/60 dark:border-white/10 bg-white/80 dark:bg-white/5 backdrop-blur supports-[backdrop-filter]:bg-white/40 shadow-lg">
-              {/* backdrop gradient */}
-              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/20 via-cyan-400/15 to-blue-400/20" />
+            <Card className="relative overflow-hidden border-white/60 dark:border-white/10 bg-white/85 dark:bg-white/5 backdrop-blur supports-[backdrop-filter]:bg-white/40 shadow-lg rounded-3xl">
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/12 via-cyan-400/10 to-blue-400/12" />
 
               <CardHeader className="relative pb-3">
-                <CardTitle className="text-2xl sm:text-3xl text-slate-900">Search For Deceased</CardTitle>
-                <CardDescription className="text-slate-600">
-                  Search by name (fuzzy), or scan a QR code.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="relative">
-                {/* Search form */}
-                <form
-                  onSubmit={onSubmit}
-                  className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-4"
-                >
-                  <div className="sm:col-span-2 lg:col-span-3">
-                    <label htmlFor="nameQuery" className="mb-1 block text-sm text-slate-600">
-                      Name
-                    </label>
-                    <Input
-                      id="nameQuery"
-                      value={nameQuery}
-                      onChange={(e) => setNameQuery(e.target.value)}
-                      placeholder="e.g., Juan Dela Cruz"
-                    />
-                  </div>
-                  <div className="sm:col-span-1 lg:col-span-1 flex gap-2 items-end">
-                    <Button type="submit">Search</Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => {
-                        setNameQuery("");
-                        setResults([]);
-                        setSuggestions([]);
-                        setNotFoundMsg("");
-                        setSelected(null);
-                        setScanDataForSelected(null);
-                        setScanResult(null);
-                        setMapCoords(null);
-                      }}
-                    >
-                      Clear
-                    </Button>
-                  </div>
-                </form>
+                <div className="flex flex-col gap-2">
+                  <CardTitle className="text-2xl sm:text-3xl text-slate-900">
+                    Find a Grave
+                  </CardTitle>
 
-                {/* Divider + Scan button */}
-                <div className="flex items-center gap-4 my-6">
-                  <div className="h-px flex-1 bg-slate-200" />
-                  <div className="text-xs uppercase tracking-wide text-slate-400">or</div>
-                  <div className="h-px flex-1 bg-slate-200" />
+                  <div className="w-full rounded-3xl border bg-white/80 px-6 py-5 shadow-sm">
+                    <div className="flex items-start gap-3">
+                      <span className="text-3xl sm:text-4xl leading-none text-slate-700">
+                        ❝
+                      </span>
+
+                      <div className="flex-1">
+                        <div className="text-lg sm:text-2xl md:text-3xl font-semibold italic text-slate-800 leading-snug">
+                          {MEMORIAL_QUOTE}
+                        </div>
+                        <div className="mt-2 text-xs sm:text-sm text-slate-500">
+                          Memorial quote
+                        </div>
+                      </div>
+
+                      <span className="text-3xl sm:text-4xl leading-none text-slate-700">
+                        ❞
+                      </span>
+                    </div>
+                  </div>
+
+                  <CardDescription className="text-slate-600 max-w-3xl">
+                    The map below always shows{" "}
+                    <span className="font-semibold">all graves/plots</span>. Search
+                    by name or scan a QR to pin a specific grave and (optionally)
+                    compute a route.
+                  </CardDescription>
                 </div>
 
-                <div className="flex justify-center">
-                  <Button
-                    onClick={() => {
-                      setScanModalOpen(true);
-                      setScanMode("choose");
-                      setScanErr("");
-                    }}
+                {/* Mode switch */}
+                <div className="mt-5 inline-flex rounded-2xl border bg-white/80 p-1 shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => switchMode("name")}
+                    aria-pressed={mode === "name"}
+                    className={[
+                      "px-4 py-2 text-sm rounded-xl transition outline-none",
+                      "focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2",
+                      mode === "name"
+                        ? "bg-slate-900 text-white shadow"
+                        : "text-slate-700 hover:bg-slate-100",
+                    ].join(" ")}
                   >
-                    Scan QR Code
-                  </Button>
+                    🔎 Search by Name
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => switchMode("qr")}
+                    aria-pressed={mode === "qr"}
+                    className={[
+                      "px-4 py-2 text-sm rounded-xl transition outline-none",
+                      "focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2",
+                      mode === "qr"
+                        ? "bg-slate-900 text-white shadow"
+                        : "text-slate-700 hover:bg-slate-100",
+                    ].join(" ")}
+                  >
+                    📷 Scan QR
+                  </button>
                 </div>
+              </CardHeader>
+
+              <CardContent className="relative">
+                {mode === "name" ? (
+                  <form
+                    onSubmit={onSubmit}
+                    className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-4"
+                  >
+                    <div className="sm:col-span-2 lg:col-span-3">
+                      <label
+                        htmlFor="nameQuery"
+                        className="mb-1 block text-sm text-slate-600"
+                      >
+                        Deceased Name
+                      </label>
+                      <Input
+                        id="nameQuery"
+                        value={nameQuery}
+                        onChange={(e) => setNameQuery(e.target.value)}
+                        placeholder="e.g., Juan Dela Cruz"
+                        className="h-11 rounded-xl"
+                      />
+                      <div className="mt-1 text-xs text-slate-500">
+                        Tip: You can type partial names. Results are fuzzy-matched.
+                      </div>
+                    </div>
+
+                    <div className="sm:col-span-1 lg:col-span-1 flex gap-2 items-end">
+                      <Button
+                        type="submit"
+                        disabled={searching}
+                        className="h-11 rounded-xl"
+                      >
+                        {searching ? "Searching…" : "Search"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11 rounded-xl"
+                        onClick={() => {
+                          setNameQuery("");
+                          resetAll();
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border bg-white/75 p-4">
+                      <div className="font-semibold text-slate-900">Scan a QR Code</div>
+                      <div className="text-sm text-slate-600 mt-1">
+                        Step 1: Scan or upload the QR. Step 2: Allow location (or use entrance).
+                        Step 3: View the grave pinned on the map.
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Button onClick={startCamera} className="h-12 rounded-xl">
+                        Open Camera Scanner
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        className="h-12 rounded-xl"
+                        onClick={() => fileRef.current?.click?.()}
+                      >
+                        Upload QR Image
+                      </Button>
+
+                      <input
+                        ref={fileRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onClick={(e) => {
+                          e.currentTarget.value = "";
+                        }}
+                        onChange={(e) => handleUploadFile(e.target.files?.[0] || null)}
+                      />
+                    </div>
+
+                    <div className="text-xs text-slate-500">
+                      QR should include <code>lat/lng</code> (or <code>latitude/longitude</code>) OR a
+                      valid <code>plot_id</code>.
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
         </div>
       </section>
 
-      {/* Loading / error states */}
+      {/* Loading / error */}
       <section className="pb-6">
         <div className="mx-auto w-full max-w-7xl px-6 lg:px-8 space-y-3">
           {loading && (
-            <Card className="bg-white/80 backdrop-blur shadow-md">
-              <CardContent className="p-6 text-center text-slate-500">
-                Loading records…
+            <Card className="bg-white/80 backdrop-blur shadow-md rounded-2xl">
+              <CardContent className="p-6">
+                <div className="animate-pulse space-y-3">
+                  <div className="h-4 w-1/3 rounded bg-slate-200" />
+                  <div className="h-4 w-2/3 rounded bg-slate-200" />
+                  <div className="h-10 w-full rounded bg-slate-200" />
+                </div>
               </CardContent>
             </Card>
           )}
           {error && (
-            <Card className="bg-white/80 backdrop-blur shadow-md border-rose-200">
+            <Card className="bg-white/80 backdrop-blur shadow-md border-rose-200 rounded-2xl">
               <CardContent className="p-6 text-center text-rose-600">
                 {error}
               </CardContent>
@@ -795,265 +1703,390 @@ export default function SearchForDeceased() {
         </div>
       </section>
 
-      {/* Search results */}
-      {(results.length > 0 || suggestions.length > 0 || notFoundMsg) && (
-        <section className="pb-2">
-          <div className="mx-auto w-full max-w-7xl px-6 lg:px-8 space-y-4">
-            {notFoundMsg && (
-              <Card className="bg-white/80 backdrop-blur shadow-md border-amber-200">
-                <CardContent className="p-6 text-center text-slate-600">
-                  {notFoundMsg}
-                </CardContent>
-              </Card>
-            )}
+      {/* Results (only show in Search mode) */}
+      {mode === "name" &&
+        (results.length > 0 || suggestions.length > 0 || notFoundMsg) && (
+          <section className="pb-2">
+            <div className="mx-auto w-full max-w-7xl px-6 lg:px-8 space-y-4">
+              {notFoundMsg && (
+                <Card className="bg-white/80 backdrop-blur shadow-md border-amber-200 rounded-2xl">
+                  <CardContent className="p-6 text-center text-slate-700">
+                    <div className="text-lg">No match found</div>
+                    <div className="mt-1 text-sm text-slate-600">{notFoundMsg}</div>
+                  </CardContent>
+                </Card>
+              )}
 
-            {results.length > 0 && (
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-slate-700">Results</div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {results.map((r) => (
-                    <RecordCard key={`res-${r.id}`} row={r} onPick={handleSelect} />
-                  ))}
+              {results.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-slate-700">
+                    Best matches ({results.length})
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {results.map((r) => (
+                      <RecordCard
+                        key={`res-${r.id ?? `${r.plot_id}-${getSearchName(r)}`}`}
+                        row={r}
+                        onPick={handleSelect}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {suggestions.length > 0 && (
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-slate-700">Suggestions</div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {suggestions.map((r) => (
-                    <RecordCard key={`sug-${r.id}`} row={r} onPick={handleSelect} />
-                  ))}
+              {suggestions.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-slate-700">
+                    Other possible matches ({suggestions.length})
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {suggestions.map((r) => (
+                      <RecordCard
+                        key={`sug-${r.id ?? `${r.plot_id}-${getSearchName(r)}`}`}
+                        row={r}
+                        onPick={handleSelect}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* Selected record details + Map (from search) */}
-      {selected && mapCoords && (
-        <section className="pb-10">
-          <div className="mx-auto w-full max-w-7xl px-6 lg:px-8 space-y-4">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <Card className="overflow-hidden lg:col-span-2">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Route to Grave</CardTitle>
-                  <CardDescription>
-                    From your location to the grave site
-                    {routeDistance > 0 && <span> • <strong>{fmtDistance(routeDistance)}</strong></span>}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {routeStatus && (
-                    <div className="text-sm text-slate-600 bg-slate-50 px-3 py-2 rounded-md">
-                      Status: {routeStatus}
-                    </div>
-                  )}
-                  <div ref={setMapNode} className="w-full h-[420px] rounded-md border z-0 relative" />
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Burial Record</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {scanDataForSelected && typeof scanDataForSelected === "object" ? (
-                    <div className="space-y-2">
-                      {(() => {
-                        const entries = qrDisplayEntries(scanDataForSelected);
-                        if (entries.length === 0) return <div className="text-sm text-slate-500">No displayable fields.</div>;
-                        return entries.map(({ key, label, value }) => (
-                          <div key={key} className="text-sm">
-                            <div className="text-slate-500">{label}</div>
-                            <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-800 break-words">
-                              {value}
-                            </div>
-                          </div>
-                        ));
-                      })()}
-                    </div>
-                  ) : (
-                    <div className="space-y-2 text-sm">
-                      <div>
-                        <div className="text-slate-500">Deceased Name</div>
-                        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-800 break-words">
-                          {selected.deceased_name || "—"}
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <div className="text-slate-500">Birth Date</div>
-                          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-800">
-                            {formatDate(selected.birth_date)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-500">Death Date</div>
-                          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-800">
-                            {formatDate(selected.death_date)}
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-slate-500">Plot</div>
-                        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-800">
-                          {selected.plot_id ?? "—"}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
+              )}
             </div>
+          </section>
+        )}
 
-            <div className="text-center">
+      {/* ALWAYS SHOW MAP + details panel */}
+      <section className="pb-10">
+        <div className="mx-auto w-full max-w-7xl px-6 lg:px-8 space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <Card className="overflow-hidden lg:col-span-2 border-white/60 bg-white/85 backdrop-blur shadow-lg rounded-3xl">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg flex flex-wrap items-center gap-2">
+                  Cemetery Map
+                  <span className="rounded-full border bg-white/80 px-2.5 py-1 text-[11px] text-slate-700">
+                    {mode === "qr" ? "via QR" : "via Name Search"}
+                  </span>
+                  <span className="rounded-full border bg-white/80 px-2.5 py-1 text-[11px] text-slate-700">
+                    All graves shown
+                  </span>
+                </CardTitle>
+
+                <CardDescription className="flex flex-wrap items-center gap-2">
+                  {routeDistance > 0 && (
+                    <span className="inline-flex items-center gap-2 rounded-full border bg-white px-3 py-1 text-xs text-slate-700 shadow-sm">
+                      Distance:{" "}
+                      <span className="font-semibold">
+                        {fmtDistance(routeDistance)}
+                      </span>
+                    </span>
+                  )}
+                </CardDescription>
+              </CardHeader>
+
+              <CardContent className="space-y-3">
+                {plotsError && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                    {plotsError}
+                  </div>
+                )}
+
+                {loadingPlots && (
+                  <div className="text-sm text-slate-600 border bg-white/80 px-3 py-2 rounded-xl">
+                    Loading graves/plots on the map…
+                  </div>
+                )}
+
+                {routeStatus && (
+                  <div className="text-sm text-slate-700 border bg-white/80 px-3 py-2 rounded-xl">
+                    <span className="font-semibold">Status:</span> {routeStatus}
+                  </div>
+                )}
+
+                {/* Controls */}
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={fitCemetery} className="rounded-xl">
+                    Fit Cemetery
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={fitRoute}
+                    disabled={!routeReady}
+                    className="rounded-xl"
+                  >
+                    Fit Route
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={centerToYou}
+                    disabled={!userLocation}
+                    className="rounded-xl"
+                  >
+                    Center: You
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={centerToGrave}
+                    disabled={!mapCoords}
+                    className="rounded-xl"
+                  >
+                    Center: Grave
+                  </Button>
+                  <Button
+                    onClick={downloadRouteImage}
+                    disabled={!routeReady}
+                    className="bg-emerald-600 text-white hover:bg-emerald-700 rounded-xl"
+                  >
+                    Download Route Image
+                  </Button>
+                </div>
+
+                <div className="w-full h-[520px] rounded-2xl border overflow-hidden shadow-sm">
+                  <CemeteryMap
+                    clickable={false}
+                    showLegend={false}
+                    showGeofence={false}
+                    // ✅ hide yellow road overlay
+                    showInitialRoads={false}
+                    // ✅ IMPORTANT: THIS IS WHAT MAKES GRAVES SHOW
+                    polygons={plotPolygons}
+                    center={mapCoords || CEMETERY_CENTER}
+                    zoom={mapCoords ? 19 : 17}
+                    markers={mapMarkers}
+                    // route line appears only after a selection + route ready
+                    polylines={routeReady ? mapPolylines : []}
+                    onMapLoad={handleMapLoad}
+                  />
+                </div>
+
+                {!hasDetailsOpen && (
+                  <div className="rounded-2xl border bg-white/90 p-4 shadow-sm">
+                    <div className="font-semibold text-slate-800">Tip</div>
+                    <div className="text-sm text-slate-600 mt-1">
+                      The map already shows{" "}
+                      <span className="font-semibold">all graves</span>. Use Search
+                      or QR to pin a grave and generate directions.
+                    </div>
+                  </div>
+                )}
+
+                {hasDetailsOpen && (
+                  <div className="rounded-2xl border bg-white/90 p-4 shadow-sm">
+                    <div className="font-semibold text-slate-800">How to get there</div>
+                    <div className="text-sm text-slate-600 mt-1">
+                      Your location uses the{" "}
+                      <span className="font-semibold">blue pin</span> and the grave uses the{" "}
+                      <span className="font-semibold">pink target pin</span>.
+                    </div>
+
+                    {routeSteps?.length ? (
+                      <ol className="mt-3 space-y-2 list-decimal pl-5 text-sm text-slate-700">
+                        {routeSteps.map((s, idx) => (
+                          <li key={idx}>{s}</li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <div className="mt-3 text-sm text-slate-500">
+                        Directions will appear once the route is ready.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="border-white/60 bg-white/85 backdrop-blur shadow-lg rounded-3xl">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Details</CardTitle>
+                <CardDescription className="text-slate-600">
+                  {hasDetailsOpen ? (
+                    <>
+                      Deceased:{" "}
+                      <span className="font-semibold">{deceasedNameResolved}</span>
+                      {scanResult?.matchedRow?.plot_id && (
+                        <span className="ml-2 text-emerald-700 text-xs font-medium">
+                          (matched by plot_id)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    "Select a record to view details."
+                  )}
+                </CardDescription>
+              </CardHeader>
+
+              <CardContent className="space-y-2">
+                {hasDetailsOpen && photoSrc ? (
+                  <div className="rounded-2xl border bg-white p-2 shadow-sm">
+                    <img
+                      src={photoSrc}
+                      alt={`Photo of ${deceasedNameResolved}`}
+                      className="w-full h-56 object-cover rounded-xl"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                      }}
+                    />
+                  </div>
+                ) : hasDetailsOpen ? (
+                  <div className="text-xs text-slate-500">
+                    No photo uploaded for this record.
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border bg-white/80 p-4 text-sm text-slate-600">
+                    Search a name or scan a QR to pin a grave and show info here.
+                  </div>
+                )}
+
+                {hasDetailsOpen && (selected || scanResult?.matchedRow) ? (
+                  <div className="space-y-2 text-sm">
+                    <div>
+                      <div className="text-slate-500">Deceased Name</div>
+                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-800 break-words shadow-sm">
+                        {getSearchName(selected || scanResult?.matchedRow) || "—"}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-slate-500">Birth Date</div>
+                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-800 shadow-sm">
+                          {formatDate(
+                            (selected || scanResult?.matchedRow)?.birth_date
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-slate-500">Death Date</div>
+                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-800 shadow-sm">
+                          {formatDate(
+                            (selected || scanResult?.matchedRow)?.death_date
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-slate-500">Plot</div>
+                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-800 shadow-sm">
+                        {(selected || scanResult?.matchedRow)?.plot_id ?? "—"}
+                      </div>
+                    </div>
+                  </div>
+                ) : hasDetailsOpen && scanDataForSelected ? (
+                  <div className="space-y-2">
+                    {(() => {
+                      const entries = qrDisplayEntries(scanDataForSelected);
+                      if (entries.length === 0)
+                        return (
+                          <div className="text-sm text-slate-500">
+                            No displayable fields.
+                          </div>
+                        );
+                      return entries.map(({ key, label, value }) => (
+                        <div key={key} className="text-sm">
+                          <div className="text-slate-500">{label}</div>
+                          <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-800 break-words shadow-sm">
+                            {value}
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          </div>
+
+          {hasDetailsOpen && (
+            <div className="text-center flex flex-wrap justify-center gap-2">
+              <Button variant="outline" className="rounded-xl" onClick={() => resetAll()}>
+                Back
+              </Button>
+
               <Button
                 variant="outline"
+                className="rounded-xl"
                 onClick={() => {
-                  setSelected(null);
-                  setScanDataForSelected(null);
-                  setMapCoords(null);
+                  switchMode("name");
+                  setNameQuery("");
                 }}
               >
-                Back to results
+                New Search
               </Button>
-            </div>
-          </div>
-        </section>
-      )}
 
-      {/* Map + QR details (from scanning) */}
-      {scanResult && mapCoords && (
-        <section className="pb-6">
-          <div className="mx-auto w-full max-w-7xl px-6 lg:px-8 space-y-4">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <Card className="overflow-hidden lg:col-span-2">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Route to Grave</CardTitle>
-                  <CardDescription>
-                    From your location to the grave site
-                    {routeDistance > 0 && <span> • <strong>{fmtDistance(routeDistance)}</strong></span>}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {routeStatus && (
-                    <div className="text-sm text-slate-600 bg-slate-50 px-3 py-2 rounded-md">
-                      Status: {routeStatus}
-                    </div>
-                  )}
-                  <div ref={setMapNode} className="w-full h-[420px] rounded-md border" />
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Burial Record</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {scanResult.data && typeof scanResult.data === "object" ? (
-                    <div className="space-y-2">
-                      {(() => {
-                        const entries = qrDisplayEntries(scanResult.data);
-                        if (entries.length === 0) return <div className="text-sm text-slate-500">No displayable fields.</div>;
-                        return entries.map(({ key, label, value }) => (
-                          <div key={key} className="text-sm">
-                            <div className="text-slate-500">{label}</div>
-                            <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-800 break-words">
-                              {value}
-                            </div>
-                          </div>
-                        ));
-                      })()}
-                    </div>
-                  ) : (
-                    <div className="text-sm text-slate-600 break-all">
-                      <span className="font-semibold">Raw:</span> {scanResult.token}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-
-            <div className="text-center">
-              <Button onClick={() => {
-                setScanResult(null);
-                setScanModalOpen(true);
-                setScanMode("choose");
-                setMapCoords(null);
-              }}>
-                Scan another QR Code
+              <Button
+                variant="outline"
+                className="rounded-xl"
+                onClick={() => switchMode("qr")}
+              >
+                Scan Another QR
               </Button>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* Scan Modal */}
-      <Dialog open={scanModalOpen} onOpenChange={(o) => (o ? setScanModalOpen(true) : closeScanModal())}>
-        <DialogContent className="sm:max-w-2xl" onInteractOutside={(e) => e.preventDefault()}>
-          <DialogHeader>
-            <DialogTitle>Scan a QR Code</DialogTitle>
-            <DialogDescription>Use your camera or upload a QR image to locate a grave on the map.</DialogDescription>
-          </DialogHeader>
-
-          {scanMode === "choose" && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Button onClick={startCamera}>Open Camera</Button>
-
-              <div className="flex items-center justify-center">
-                <label
-                  htmlFor="qr-upload"
-                  className="w-full cursor-pointer rounded-md border border-input bg-background px-4 py-2.5 text-center text-sm font-medium hover:bg-accent hover:text-accent-foreground"
-                >
-                  Upload QR Image
-                </label>
-                <input
-                  id="qr-upload"
-                  ref={fileRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onClick={(e) => { e.currentTarget.value = ""; }}
-                  onChange={(e) => handleUploadFile(e.target.files?.[0] || null)}
-                />
-              </div>
             </div>
           )}
+        </div>
+      </section>
+
+      {/* Scan Modal */}
+      <Dialog
+        open={scanModalOpen}
+        onOpenChange={(o) => (o ? setScanModalOpen(true) : closeScanModal())}
+      >
+        <DialogContent
+          className="sm:max-w-2xl rounded-2xl"
+          onInteractOutside={(e) => e.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle>QR Scanner</DialogTitle>
+            <DialogDescription>
+              Point your camera at the QR code. We’ll auto-detect it and pin the grave on the map.
+            </DialogDescription>
+          </DialogHeader>
 
           {scanMode === "camera" && (
             <div className="space-y-3">
-              <div className="rounded-lg overflow-hidden border">
+              <div className="rounded-xl overflow-hidden border">
                 <div className="w-full aspect-video bg-muted/40">
-                  <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
+                  <video
+                    ref={videoRef}
+                    className="w-full h-full object-cover"
+                    muted
+                    playsInline
+                    autoPlay
+                  />
                 </div>
               </div>
 
               {scanErr && (
-                <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
+                <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
                   {scanErr}
                 </div>
               )}
 
               <DialogFooter className="gap-2 sm:gap-0">
-                <Button variant="outline" onClick={() => { stopCamera(); setScanMode("choose"); }}>
-                  Back
+                <Button
+                  variant="outline"
+                  className="rounded-xl"
+                  onClick={() => {
+                    stopCamera();
+                    setScanModalOpen(false);
+                    setScanMode("choose");
+                  }}
+                >
+                  Close
                 </Button>
-                <Button onClick={closeScanModal}>Close</Button>
               </DialogFooter>
             </div>
           )}
 
           {scanMode === "upload" && (
             <div className="text-sm text-slate-600">
-              Processing image… {scanErr && <span className="text-rose-600 font-medium ml-2">{scanErr}</span>}
+              Processing image…{" "}
+              {scanErr && (
+                <span className="text-rose-600 font-medium ml-2">{scanErr}</span>
+              )}
             </div>
           )}
 
-          {scanErr && scanMode !== "upload" && scanMode !== "camera" && (
-            <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
+          {scanMode === "choose" && scanErr && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm">
               {scanErr}
             </div>
           )}
@@ -1061,20 +2094,32 @@ export default function SearchForDeceased() {
       </Dialog>
 
       {/* Location Permission Modal */}
-      <Dialog open={locationModalOpen} onOpenChange={setLocationModalOpen}>
-        <DialogContent className="sm:max-w-md" onInteractOutside={(e) => e.preventDefault()}>
+      <Dialog
+        open={locationModalOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            useDefaultLocation();
+            return;
+          }
+          setLocationModalOpen(true);
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-md rounded-2xl"
+          onInteractOutside={(e) => e.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>Use Your Location?</DialogTitle>
             <DialogDescription>
-              We need your location to show you the best route to the grave site.
-              If you decline, we'll use the cemetery entrance as the starting point.
+              If you allow location access, we’ll start the route from where you are.
+              If you decline, we’ll start from the cemetery entrance.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="outline" onClick={useDefaultLocation}>
+            <Button variant="outline" className="rounded-xl" onClick={useDefaultLocation}>
               Use Cemetery Entrance
             </Button>
-            <Button onClick={requestUserLocation}>
+            <Button className="rounded-xl" onClick={requestUserLocation}>
               Allow Location Access
             </Button>
           </DialogFooter>

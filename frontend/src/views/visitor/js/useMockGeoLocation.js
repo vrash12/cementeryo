@@ -1,37 +1,42 @@
-import { useEffect, useRef, useState } from "react";
+// src/views/visitor/js/useMockGeoLocation.js
+import { useState, useEffect, useRef } from "react";
+import mockPath from "./mockUserLocationSeries.json";
 
-/**
- * Hook to simulate geolocation updates from a static JSON series.
- *
- * @param {Array<{lat:number,lng:number}>} points - Series of mock locations.
- * @param {number} intervalMs - Delay between updates (default 2000 ms).
- * @returns {{ location: {lat:number,lng:number}|null, index: number }}
- */
-export default function useMockGeolocation(points = [], intervalMs = 2000) {
-  const [index, setIndex] = useState(0);
+export function useMockGeoLocation({ enabled = false } = {}) {
   const [location, setLocation] = useState(null);
+  const [finished, setFinished] = useState(false);
+  const indexRef = useRef(0);
   const timerRef = useRef(null);
 
+  // Reset if enabled toggles
   useEffect(() => {
-    if (!points.length) return;
+    if (!enabled) {
+      clearInterval(timerRef.current);
+      setFinished(false);
+      indexRef.current = 0;
+      return;
+    }
 
-    // Start from the first point
-    setLocation(points[0]);
-    setIndex(0);
+    // Set initial position immediately
+    if (mockPath.length > 0) {
+      setLocation(mockPath[0]);
+    }
 
+    // Start walking interval
     timerRef.current = setInterval(() => {
-      setIndex((prev) => {
-        const next = (prev + 1) % points.length;
-        setLocation(points[next]);
-        console.log(
-          `[MockGeo] Update #${next}: ${points[next].lat}, ${points[next].lng} @ ${new Date().toISOString()}`
-        );
-        return next;
-      });
-    }, intervalMs);
+      const nextIndex = indexRef.current + 1;
+      
+      if (nextIndex >= mockPath.length) {
+        clearInterval(timerRef.current);
+        setFinished(true);
+      } else {
+        indexRef.current = nextIndex;
+        setLocation(mockPath[nextIndex]);
+      }
+    }, 800); // Update every 800ms (brisk walk speed)
 
     return () => clearInterval(timerRef.current);
-  }, [points, intervalMs]);
+  }, [enabled]);
 
-  return { location, index };
+  return { location, finished };
 }

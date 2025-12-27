@@ -21,11 +21,7 @@ const {
 router.get('/get-all-tickets/', verifyToken, getAllTickets);
 router.patch('/change-status/:id', verifyToken, changeTicketStatus);
 
-// burial schedules
-router.get('/burial-schedules/', verifyToken, getBurialSchedules);
-router.post('/burial-schedules', verifyToken, createBurialSchedule);
-router.put('/burial-schedules/:id', verifyToken, updateBurialSchedule);
-router.delete('/burial-schedules/:id', verifyToken, deleteBurialSchedule);
+
 
 // plots (not used in graves)
 router.get('/plots/available', verifyToken, getAvailablePlots);

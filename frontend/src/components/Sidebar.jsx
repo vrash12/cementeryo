@@ -1,3 +1,5 @@
+// frontend/src/layouts/Sidebar.jsx (or wherever this file is)
+
 import { NavLink, useLocation } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { getAuth } from "../utils/auth";
@@ -19,11 +21,9 @@ import {
 
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
-import { Separator } from "../components/ui/separator";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { Card, CardHeader, CardContent } from "../components/ui/card";
 
-// ⬇️ Your modal component
 import ProfileModal from "../components/Profile";
 
 const W_FULL = 272;
@@ -33,16 +33,30 @@ const cx = (...c) => c.filter(Boolean).join(" ");
 const API_BASE =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) || "";
 
-export default function Sidebar({ base = "" }) {
+export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [q, setQ] = useState("");
 
-  const [authObj, setAuthObj] = useState(() => getAuth());
+  const [authObj, setAuthObj] = useState(() => {
+    const a = getAuth();
+    console.log("[Sidebar] initial authObj:", a);
+    return a;
+  });
+
   const user = authObj?.user || {};
   const role = user?.role || "visitor";
 
-  // visitors don't see this sidebar
-  if (role === "visitor") return null;
+  const { pathname } = useLocation();
+
+  // 🔍 Log whenever the route changes
+  useEffect(() => {
+    console.log("[Sidebar] pathname changed:", pathname, "role:", role);
+  }, [pathname, role]);
+
+  if (role === "visitor") {
+    console.log("[Sidebar] role is visitor → Sidebar hidden");
+    return null;
+  }
 
   const fullName =
     `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || "—";
@@ -51,16 +65,13 @@ export default function Sidebar({ base = "" }) {
 
   const [profileOpen, setProfileOpen] = useState(false);
 
-  // When the modal closes, re-read localStorage (your modal writes to it after save)
   useEffect(() => {
     if (!profileOpen) {
       const fresh = getAuth();
+      console.log("[Sidebar] profile closed, refreshed authObj:", fresh);
       setAuthObj(fresh);
     }
   }, [profileOpen]);
-
-  const prefix = String(base || "").replace(/\/+$/, "");
-  const { pathname } = useLocation();
 
   const I = {
     dashboard: LayoutDashboard,
@@ -76,32 +87,23 @@ export default function Sidebar({ base = "" }) {
     maintenance: Wrench,
   };
 
-  // Admin has all admin + former super-admin + staff items
   const items = useMemo(() => {
+    let list;
     if (role === "admin") {
-      return [
-  
-    
-       
-        { to: "/visitor", label: "Visitors", icon: I.visitors },
-
-        // plots / records
-        { to: "/plots", label: "Burial Plots", icon: I.plots },
-        { to: "/road-plots", label: "Road Plots", icon: I.plots },
-        { to: "/building-plots", label: "Building Plots", icon: I.plots },
-        { to: "/records", label: "Burial Records", icon: I.records },
-
-
-        { to: "/tickets", label: "View Tickets", icon: I.tickets },
-        { to: "/burials", label: "Burial Schedule", icon: I.burials },
-        { to: "/maintenance", label: "Maintenance", icon: I.maintenance },
+      list = [
+        { to: "/admin/dashboard", label: "Dashboard", icon: I.dashboard },
+        { to: "/admin/visitor", label: "Visitors", icon: I.visitors },
+        { to: "/admin/plots", label: "Burial Plots", icon: I.plots },
+        { to: "/admin/records", label: "Burial Records", icon: I.records },
+      
+        { to: "/admin/burials", label: "Burial Schedule", icon: I.burials },
+        { to: "/admin/maintenance", label: "Maintenance", icon: I.maintenance },
       ];
+    } else {
+      list = [{ to: "/visitor/dashboard", label: "Dashboard", icon: I.dashboard }];
     }
-
-
-
-    // Fallback / future roles
-    return [{ to: "/visitor/dashboard", label: "Dashboard", icon: I.dashboard }];
+    console.log("[Sidebar] menu items for role", role, ":", list);
+    return list;
   }, [role]);
 
   const filtered = q
@@ -111,6 +113,7 @@ export default function Sidebar({ base = "" }) {
   async function logout() {
     try {
       const token = authObj?.token;
+      console.log("[Sidebar] logout clicked, token:", token);
       await fetch(`${API_BASE}/logout`, {
         method: "POST",
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
@@ -132,14 +135,16 @@ export default function Sidebar({ base = "" }) {
       >
         {/* Header card */}
         <Card className="relative m-4 rounded-2xl border-emerald-100 bg-white/80 backdrop-blur shadow-[0_12px_30px_-12px_rgba(16,185,129,0.25)] overflow-hidden">
-          {/* subtle gradient overlay */}
           <div className="absolute inset-0 bg-gradient-to-br from-emerald-400/5 to-cyan-400/5 pointer-events-none"></div>
 
           <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
             {/* ▶️ Profile modal trigger */}
             <button
               type="button"
-              onClick={() => setProfileOpen(true)}
+              onClick={() => {
+                console.log("[Sidebar] profile avatar clicked");
+                setProfileOpen(true);
+              }}
               title="Open Profile"
               className={cx(
                 "flex items-center gap-3 rounded-xl transition-all duration-300",
@@ -169,7 +174,10 @@ export default function Sidebar({ base = "" }) {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => setCollapsed((c) => !c)}
+              onClick={() => {
+                console.log("[Sidebar] collapse toggled. was:", collapsed, "now:", !collapsed);
+                setCollapsed((c) => !c);
+              }}
               title={collapsed ? "Expand" : "Collapse"}
               className="h-9 w-9 rounded-xl border border-emerald-200 bg-white hover:bg-gradient-to-br hover:from-emerald-50 hover:to-cyan-50 shadow-md hover:shadow-lg transition-all"
             >
@@ -187,7 +195,10 @@ export default function Sidebar({ base = "" }) {
                 <Search size={16} className="text-emerald-500" />
                 <Input
                   value={q}
-                  onChange={(e) => setQ(e.target.value)}
+                  onChange={(e) => {
+                    console.log("[Sidebar] search changed:", e.target.value);
+                    setQ(e.target.value);
+                  }}
                   placeholder="Search..."
                   className="border-0 bg-transparent focus-visible:ring-0 text-sm placeholder:text-slate-400"
                 />
@@ -196,22 +207,20 @@ export default function Sidebar({ base = "" }) {
           )}
         </Card>
 
-        <div className="relative mx-4">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-emerald-100"></div>
-          </div>
-          <div className="relative flex justify-center">
-            <div className="h-0.5 w-20 bg-gradient-to-r from-emerald-400/0 via-emerald-400/50 to-emerald-400/0"></div>
-          </div>
-        </div>
-
         {/* Scrollable nav */}
         <ScrollArea className="flex-1 px-3 pt-2">
           {filtered.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
-              to={`${prefix}${to}`}
+              to={to}
               end
+              onClick={() =>
+                console.log("[Sidebar] Nav click", {
+                  from: pathname,
+                  to,
+                  label,
+                })
+              }
               className={({ isActive }) =>
                 cx(
                   "group relative flex items-center gap-3 rounded-xl p-2 text-[14px] font-medium transition-all mb-1",

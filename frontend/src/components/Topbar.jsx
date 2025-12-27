@@ -1,11 +1,20 @@
+// src/layout/Topbar.jsx
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
+
 import { Button } from "../components/ui/button";
 import {
-  Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger,
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
 } from "../components/ui/sheet";
 import {
-  NavigationMenu, NavigationMenuItem, NavigationMenuLink, NavigationMenuList,
+  NavigationMenu,
+  NavigationMenuItem,
+  NavigationMenuLink,
+  NavigationMenuList,
 } from "../components/ui/navigation-menu";
 import { Separator } from "../components/ui/separator";
 import {
@@ -16,33 +25,36 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "../components/ui/dropdown-menu";
+
 import { Menu, LogOut, Ticket, User2 } from "lucide-react";
+
 import ProfileModal from "../components/Profile";
 import MyRequest from "../components/MyRequest";
 import MyDeceasedFamily from "../components/MyDeceasedFamily";
 
 const API_BASE =
-  (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) || "";
-const IMG_BASE =
-  (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL_IMAGE) || API_BASE;
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) ||
+  "";
 
-const resolveAssetUrl = (p) => {
-  if (!p) return null;
-  try { return new URL(p, IMG_BASE.replace(/\/+$/, "") + "/").toString(); }
-  catch { return p; }
-};
+// ✅ Static brand name (no API fetch)
+const SITE_NAME = "Garden of Peace";
+
+// Optional: if you have a local logo in /public, set it here (e.g. "/logo.png").
+// Leave as null to hide the logo.
+const STATIC_LOGO_URL = null;
 
 export default function Topbar() {
   const nav = useNavigate();
 
   const [scrolled, setScrolled] = useState(false);
-  const [siteName, setSiteName] = useState("Garden of Peace");
-  const [siteLogoUrl, setSiteLogoUrl] = useState(null);
+
+  // Logo state (optional)
+  const [siteLogoUrl] = useState(STATIC_LOGO_URL);
   const [logoError, setLogoError] = useState(false);
 
   // Modal + mobile sheet state
   const [profileOpen, setProfileOpen] = useState(false);
-  const [myReqOpen, setMyReqOpen] = useState(false); 
+  const [myReqOpen, setMyReqOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [myFamilyOpen, setMyFamilyOpen] = useState(false);
 
@@ -53,28 +65,15 @@ export default function Topbar() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetch(`${API_BASE}/cemetery-info/`);
-        if (!r.ok) return;
-        const j = await r.json().catch(() => null);
-        const d = j?.data || j;
-        if (!d || cancelled) return;
-        if (d.name) setSiteName(d.name);
-        if (d.logo_url) {
-          setSiteLogoUrl(resolveAssetUrl(d.logo_url));
-          setLogoError(false);
-        }
-      } catch {}
-    })();
-    return () => { cancelled = true; };
-  }, []);
+  const authRaw =
+    typeof window !== "undefined" ? localStorage.getItem("auth") : null;
 
-  const authRaw = typeof window !== "undefined" ? localStorage.getItem("auth") : null;
   const auth = useMemo(() => {
-    try { return authRaw ? JSON.parse(authRaw) : null; } catch { return null; }
+    try {
+      return authRaw ? JSON.parse(authRaw) : null;
+    } catch {
+      return null;
+    }
   }, [authRaw]);
 
   const role = auth?.user?.role || null;
@@ -84,7 +83,11 @@ export default function Topbar() {
   const lastName = auth?.user?.last_name || "";
 
   function handleLogout() {
-    try { localStorage.removeItem("auth"); } catch {}
+    try {
+      localStorage.removeItem("auth");
+    } catch {
+      // ignore
+    }
     nav("/visitor/login");
   }
 
@@ -116,29 +119,58 @@ export default function Topbar() {
                     </Button>
                   </SheetTrigger>
 
-                  <SheetContent side="left" className="p-0 w-80 max-w-[85%] bg-white">
+                  <SheetContent
+                    side="left"
+                    className="p-0 w-80 max-w-[85%] bg-white"
+                  >
                     <SheetHeader className="px-4 py-3 border-b border-slate-200">
                       <SheetTitle className="text-base">Menu</SheetTitle>
                     </SheetHeader>
 
                     <nav className="p-4">
-                      <MobileLink to="/visitor/home" label="Home" />
-                      <MobileLink to="/visitor/search" label="Search For Deceased" />
-                      <MobileLink to="/visitor/inquire" label="Inquire" />
+                      <MobileLink
+                        to="/visitor/home"
+                        label="Home"
+                        onNavigate={() => setMobileOpen(false)}
+                      />
+                      <MobileLink
+                        to="/visitor/search"
+                        label="Search For Deceased"
+                        onNavigate={() => setMobileOpen(false)}
+                      />
+
+                      <MobileLink
+                        to="/visitor/reservation"
+                        label="Reservation"
+                        onNavigate={() => setMobileOpen(false)}
+                      />
+
+                      <MobileLink
+                        to="/visitor/inquire"
+                        label="Inquire"
+                        onNavigate={() => setMobileOpen(false)}
+                      />
 
                       {!isVisitorLoggedIn ? (
-                        <MobileLink to="/visitor/login" label="Login" />
+                        <MobileLink
+                          to="/visitor/login"
+                          label="Login"
+                          onNavigate={() => setMobileOpen(false)}
+                        />
                       ) : (
                         <div className="mt-2">
                           <div className="block px-4 py-3 rounded-lg text-base font-semibold text-emerald-700 bg-emerald-50">
                             Welcome {firstName} {lastName}
                           </div>
+
                           <div className="mt-2 grid gap-2 px-1">
-                            {/* OPEN PROFILE MODAL ON MOBILE */}
                             <Button
                               variant="secondary"
                               className="justify-start"
-                              onClick={() => { setMobileOpen(false); setProfileOpen(true); }}
+                              onClick={() => {
+                                setMobileOpen(false);
+                                setProfileOpen(true);
+                              }}
                             >
                               <User2 className="mr-2 h-4 w-4" />
                               My Profile
@@ -147,7 +179,10 @@ export default function Topbar() {
                             <Button
                               variant="outline"
                               className="justify-start"
-                              onClick={() => { setMobileOpen(false); setMyFamilyOpen(true); }}
+                              onClick={() => {
+                                setMobileOpen(false);
+                                setMyFamilyOpen(true);
+                              }}
                             >
                               <User2 className="mr-2 h-4 w-4" />
                               My Deceased Family
@@ -156,13 +191,20 @@ export default function Topbar() {
                             <Button
                               variant="outline"
                               className="justify-start"
-                              onClick={() => { setMobileOpen(false); setMyReqOpen(true); }}
+                              onClick={() => {
+                                setMobileOpen(false);
+                                setMyReqOpen(true);
+                              }}
                             >
                               <Ticket className="mr-2 h-4 w-4" />
                               My Requests
                             </Button>
 
-                            <Button variant="destructive" className="justify-start" onClick={handleLogout}>
+                            <Button
+                              variant="destructive"
+                              className="justify-start"
+                              onClick={handleLogout}
+                            >
                               <LogOut className="mr-2 h-4 w-4" />
                               Logout
                             </Button>
@@ -171,13 +213,44 @@ export default function Topbar() {
                       )}
 
                       <Separator className="my-4" />
-                      <div className="px-3 text-xs uppercase tracking-wider text-slate-500">Quick Actions</div>
+                      <div className="px-3 text-xs uppercase tracking-wider text-slate-500">
+                        Quick Actions
+                      </div>
+
                       <div className="mt-2 grid grid-cols-2 gap-2 px-3">
-                        <Button asChild variant="secondary" className="justify-center">
-                          <NavLink to="/visitor/search">Search</NavLink>
+                        <Button
+                          asChild
+                          variant="secondary"
+                          className="justify-center"
+                        >
+                          <NavLink
+                            to="/visitor/search"
+                            onClick={() => setMobileOpen(false)}
+                          >
+                            Search
+                          </NavLink>
                         </Button>
+
                         <Button asChild variant="outline" className="justify-center">
-                          <NavLink to="/visitor/inquire">Request</NavLink>
+                          <NavLink
+                            to="/visitor/inquire"
+                            onClick={() => setMobileOpen(false)}
+                          >
+                            Request
+                          </NavLink>
+                        </Button>
+
+                        <Button
+                          asChild
+                          variant="outline"
+                          className="justify-center col-span-2"
+                        >
+                          <NavLink
+                            to="/visitor/reservation"
+                            onClick={() => setMobileOpen(false)}
+                          >
+                            Reservation
+                          </NavLink>
                         </Button>
                       </div>
                     </nav>
@@ -196,8 +269,9 @@ export default function Topbar() {
                     onError={() => setLogoError(true)}
                   />
                 ) : null}
+
                 <span className="text-2xl md:text-3xl font-extrabold tracking-tight text-emerald-700">
-                  {siteName}
+                  {SITE_NAME}
                 </span>
               </div>
             </div>
@@ -208,6 +282,7 @@ export default function Topbar() {
                   <NavigationMenuList className="gap-1">
                     <NavButton to="/visitor/home" label="Home" />
                     <NavButton to="/visitor/search" label="Search For Deceased" />
+                    <NavButton to="/visitor/reservation" label="Reservation" />
                     <NavButton to="/visitor/inquire" label="Inquire" />
 
                     {!isVisitorLoggedIn ? (
@@ -216,16 +291,29 @@ export default function Topbar() {
                       <NavigationMenuItem>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" className="text-emerald-700 hover:text-emerald-800 font-semibold">
+                            <Button
+                              variant="ghost"
+                              className="text-emerald-700 hover:text-emerald-800 font-semibold"
+                            >
                               Welcome {firstName} {lastName}
                             </Button>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent side="bottom" align="end" className="w-56">
-                            <DropdownMenuLabel className="font-medium">Visitor</DropdownMenuLabel>
+
+                          <DropdownMenuContent
+                            side="bottom"
+                            align="end"
+                            className="w-56"
+                          >
+                            <DropdownMenuLabel className="font-medium">
+                              Visitor
+                            </DropdownMenuLabel>
                             <DropdownMenuSeparator />
-                            {/* OPEN PROFILE MODAL ON DESKTOP */}
+
                             <DropdownMenuItem
-                              onSelect={(e) => { e.preventDefault(); setProfileOpen(true); }}
+                              onSelect={(e) => {
+                                e.preventDefault();
+                                setProfileOpen(true);
+                              }}
                               className="cursor-pointer"
                             >
                               <User2 className="mr-2 h-4 w-4" />
@@ -233,7 +321,10 @@ export default function Topbar() {
                             </DropdownMenuItem>
 
                             <DropdownMenuItem
-                              onSelect={(e) => { e.preventDefault(); setMyFamilyOpen(true); }}
+                              onSelect={(e) => {
+                                e.preventDefault();
+                                setMyFamilyOpen(true);
+                              }}
                               className="cursor-pointer"
                             >
                               <User2 className="mr-2 h-4 w-4" />
@@ -241,7 +332,10 @@ export default function Topbar() {
                             </DropdownMenuItem>
 
                             <DropdownMenuItem
-                              onSelect={(e) => { e.preventDefault(); setMyReqOpen(true); }}
+                              onSelect={(e) => {
+                                e.preventDefault();
+                                setMyReqOpen(true);
+                              }}
                               className="cursor-pointer"
                             >
                               <Ticket className="mr-2 h-4 w-4" />
@@ -249,8 +343,25 @@ export default function Topbar() {
                             </DropdownMenuItem>
 
                             <DropdownMenuSeparator />
+
                             <DropdownMenuItem
-                              onSelect={(e) => { e.preventDefault(); handleLogout(); }}
+                              onSelect={(e) => {
+                                e.preventDefault();
+                                nav("/visitor/reservation");
+                              }}
+                              className="cursor-pointer"
+                            >
+                              <Ticket className="mr-2 h-4 w-4" />
+                              Reservation
+                            </DropdownMenuItem>
+
+                            <DropdownMenuSeparator />
+
+                            <DropdownMenuItem
+                              onSelect={(e) => {
+                                e.preventDefault();
+                                handleLogout();
+                              }}
                               className="text-rose-600 focus:text-rose-600 cursor-pointer"
                             >
                               <LogOut className="mr-2 h-4 w-4" />
@@ -275,8 +386,9 @@ export default function Topbar() {
         open={myFamilyOpen}
         onOpenChange={setMyFamilyOpen}
         burialId={auth?.user?.id}
-      /> 
+      />
 
+      {/* spacer for fixed header */}
       <div className="h-5" />
     </Fragment>
   );
@@ -285,12 +397,19 @@ export default function Topbar() {
 function NavButton({ to, label }) {
   return (
     <NavigationMenuItem>
-      <Button asChild variant="ghost" className="text-slate-600 hover:text-slate-900">
+      <Button
+        asChild
+        variant="ghost"
+        className="text-slate-600 hover:text-slate-900"
+      >
         <NavigationMenuLink asChild>
           <NavLink
             to={to}
             className={({ isActive }) =>
-              ["px-3 py-2 rounded-lg text-sm", isActive ? "text-emerald-700 font-semibold" : ""].join(" ")
+              [
+                "px-3 py-2 rounded-lg text-sm",
+                isActive ? "text-emerald-700 font-semibold" : "",
+              ].join(" ")
             }
           >
             {label}
@@ -301,14 +420,17 @@ function NavButton({ to, label }) {
   );
 }
 
-function MobileLink({ to, label }) {
+function MobileLink({ to, label, onNavigate }) {
   return (
     <NavLink
       to={to}
+      onClick={onNavigate}
       className={({ isActive }) =>
         [
           "block px-4 py-3 rounded-lg text-base font-medium",
-          isActive ? "bg-emerald-50 text-emerald-700" : "text-slate-700 hover:bg-slate-50",
+          isActive
+            ? "bg-emerald-50 text-emerald-700"
+            : "text-slate-700 hover:bg-slate-50",
         ].join(" ")
       }
     >

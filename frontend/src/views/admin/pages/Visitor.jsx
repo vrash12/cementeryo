@@ -73,15 +73,17 @@ export default function VisitorManagement() {
   const [selected, setSelected] = useState(null);      // for view/edit
   const [confirmUser, setConfirmUser] = useState(null); // for delete
 
-  const fetchUsers = useCallback(async () => {
-    setError(null);
-    const result = await getUsers();
-    if (!result.ok) {
-      setError(result.error || "Failed to load users.");
-      return;
-    }
-    setRows(result.data.filter(isVisitor));
-  }, []);
+const fetchUsers = useCallback(async () => {
+  setError(null);
+  const result = await getUsers();
+  if (!result.ok) {
+    setError(result.error || "Failed to load users.");
+    return;
+  }
+  // endpoint already returns only visitors
+  setRows(result.data || []);
+}, []);
+
 
   useEffect(() => {
     fetchUsers();

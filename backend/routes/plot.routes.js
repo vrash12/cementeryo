@@ -1,15 +1,34 @@
 // backend/routes/plot.routes.js
-const express = require('express');
-const router = express.Router();
-const plotController = require('../controllers/plot.controller');
+const router = require("express").Router();
 
-router.get('/road-plots', plotController.getRoadPlotsGeoJSON);
-router.get('/road-plots/:id', plotController.getRoadPlotById);
+const {
+  getPlotsGeoJSON,
+  getPlotById,
+  getRoadPlotsGeoJSON,
+  getRoadPlotById,
+  getBuildingPlotsGeoJSON,
+  getBuildingPlotById,
+} = require("../controllers/plot.controller");
 
-router.get('/building-plots', plotController.getBuildingPlotsGeoJSON);
-router.get('/building-plots/:id', plotController.getBuildingPlotById);
+/**
+ * IMPORTANT:
+ * Your frontend Reservation.jsx calls:
+ *   GET /api/plot/
+ *   GET /api/plot/road-plots
+ *
+ * So we must define them here.
+ */
 
-router.get('/', plotController.getPlotsGeoJSON);
-router.get('/:id', plotController.getPlotById);
+// Main plots (graves)
+router.get("/", getPlotsGeoJSON);
+router.get("/:id", getPlotById);
+
+// Roads (returns LineString/MultiLineString FeatureCollection)
+router.get("/road-plots", getRoadPlotsGeoJSON);
+router.get("/road-plots/:id", getRoadPlotById);
+
+// Buildings (optional, but useful for map layers)
+router.get("/building-plots", getBuildingPlotsGeoJSON);
+router.get("/building-plots/:id", getBuildingPlotById);
 
 module.exports = router;

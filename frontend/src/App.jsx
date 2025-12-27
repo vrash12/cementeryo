@@ -1,3 +1,4 @@
+// src/App.jsx
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
@@ -10,12 +11,11 @@ import AlertsHost from "./views/components/AlertsHost";
 // Admin pages
 import BurialPlots from "./views/admin/pages/BurialPlots";
 import BurialRecords from "./views/admin/pages/BurialRecords";
-import RoadPlots from "./views/admin/pages/RoadPlots";
-import BuildingPlots from "./views/admin/pages/BuildingPlots";
+import Dashboard from "./views/admin/pages/Dashboard";
 import ViewTickets from "./views/admin/pages/ViewTickets";
 import BurialSchedule from "./views/admin/pages/BurialSchedule";
 import MaintenanceSchedules from "./views/admin/pages/MaintenanceSchedule";
-import VisitorManagement from "./views/admin/pages/Visitor"; // ⬅️ NEW
+import VisitorManagement from "./views/admin/pages/Visitor";
 
 // Visitor pages
 import SearchForDeceased from "./views/visitor/pages/SearchForDeceased";
@@ -28,6 +28,9 @@ const AdminSet = lazy(() => import("./views/admin/pages/Settings"));
 const VisitorHome = lazy(() => import("./views/visitor/pages/Home"));
 const VisitorLogin = lazy(() => import("./views/login/Login"));
 const VisitorSet = lazy(() => import("./views/visitor/pages/Settings"));
+
+// ✅ NEW: Reservation page
+const VisitorReservation = lazy(() => import("./views/visitor/pages/Reservation"));
 
 function Loading() {
   return <div className="p-6">Loading…</div>;
@@ -76,11 +79,12 @@ export default function App() {
     <BrowserRouter>
       <Suspense fallback={<Loading />}>
         <AlertsHost />
+
         <Routes>
           {/* Root: send logged-in users to their portal, others to visitor home */}
           <Route path="/" element={<RoleLanding />} />
 
-          {/* VISITOR (public) */}
+          {/* VISITOR (public shell) */}
           <Route
             path="/visitor"
             element={
@@ -95,6 +99,12 @@ export default function App() {
             <Route path="inquire" element={<VisitorInquire />} />
             <Route path="search" element={<SearchForDeceased />} />
             <Route path="settings" element={<VisitorSet />} />
+
+            {/* ✅ NEW: Reservation route */}
+            {/* If you want it visitor-only (logged in), wrap it with ProtectedRoute allow={["visitor"]}. */}
+            <Route path="reservation" element={<VisitorReservation />} />
+
+            {/* Any stray /visitor path → home */}
             <Route path="*" element={<Navigate to="/visitor/home" replace />} />
           </Route>
 
@@ -107,36 +117,26 @@ export default function App() {
                   <RoleLayout base="/admin">
                     <Routes>
                       {/* Default admin landing: plots */}
-                      <Route
-                        index
-                        element={<Navigate to="/admin/plots" replace />}
-                      />
+                      <Route index element={<Navigate to="/admin/plots" replace />} />
 
-                      {/* 🔹 Visitors management (matches sidebar `to: "/visitor"`) */}
+                      {/* Visitors management */}
                       <Route path="visitor" element={<VisitorManagement />} />
 
                       {/* Plot management */}
                       <Route path="plots" element={<BurialPlots />} />
-                      <Route path="road-plots" element={<RoadPlots />} />
-                      <Route path="building-plots" element={<BuildingPlots />} />
                       <Route path="records" element={<BurialRecords />} />
 
                       {/* Staff features under admin */}
                       <Route path="tickets" element={<ViewTickets />} />
                       <Route path="burials" element={<BurialSchedule />} />
-                      <Route
-                        path="maintenance"
-                        element={<MaintenanceSchedules />}
-                      />
+                      <Route path="maintenance" element={<MaintenanceSchedules />} />
+                      <Route path="dashboard" element={<Dashboard />} />
 
                       {/* Admin settings */}
                       <Route path="settings" element={<AdminSet />} />
 
                       {/* Any stray /admin path → plots */}
-                      <Route
-                        path="*"
-                        element={<Navigate to="/admin/plots" replace />}
-                      />
+                      <Route path="*" element={<Navigate to="/admin/plots" replace />} />
                     </Routes>
                   </RoleLayout>
                 </PortalGuard>

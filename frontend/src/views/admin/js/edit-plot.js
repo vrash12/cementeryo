@@ -4,11 +4,10 @@ const API_BASE =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) || "";
 
 export async function editPlot(payload) {
-  const auth = getAuth();
-  const token = auth?.token; 
+  const token = getAuth()?.token;
 
   const res = await fetch(`${API_BASE}/admin/edit-plot`, {
-    method: "PUT",
+    method: "PUT", // ✅ must match backend
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -22,5 +21,6 @@ export async function editPlot(payload) {
   if (!res.ok) {
     throw new Error(typeof body === "string" ? body : JSON.stringify(body));
   }
+
   return body;
 }
