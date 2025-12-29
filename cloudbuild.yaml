@@ -1,18 +1,73 @@
+substitutions:
+  _REGION: "europe-west1"
+  _BACKEND_SERVICE: "cemetery-backend"
+  _FRONTEND_SERVICE: "cemetery-frontend"
+  _VITE_GOOGLE_MAPS_API_KEY: "YOUR_KEY_HERE"
+
 steps:
-  - name: gcr.io/cloud-builders/docker
+  # ---------------- BACKEND ----------------
+  - id: "Build backend image"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "gcr.io/$PROJECT_ID/backend", "-f", "backend/Dockerfile", "."]
+
+  - id: "Push backend image"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["push", "gcr.io/$PROJECT_ID/backend"]
+
+  - id: "Deploy backend to Cloud Run"
+    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    entrypoint: "gcloud"
     args:
       [
-        "build",
-        "-t", "gcr.io/$PROJECT_ID/frontend",
-        "-f", "frontend/Dockerfile",
-        "frontend",
-        "--build-arg", "VITE_GOOGLE_MAPS_API_KEY=$_VITE_GOOGLE_MAPS_API_KEY",
-        "--build-arg", "VITE_API_BASE_URL=$_VITE_API_BASE_URL",
-        "--build-arg", "VITE_API_BASE_URL_IMAGE=$_VITE_API_BASE_URL_IMAGE"
+        "run", "deploy", "${_BACKEND_SERVICE}",
+        "--image", "gcr.io/$PROJECT_ID/backend",
+        "--region", "${_REGION}",
+        "--platform", "managed",
+        "--allow-unauthenticated",
+        "--port", "8080"
       ]
-images:
-  - "gcr.io/$PROJECT_ID/frontend"
-substitutions:
-  _VITE_GOOGLE_MAPS_API_KEY: "AIzaSyB7JcfJ0D3qepMYrKewniftNUjW3RnisHw"
-  _VITE_API_BASE_URL: "https://cementeryo-128257388449.europe-west1.run.app/api"
-  _VITE_API_BASE_URL_IMAGE: "https://cementeryo-128257388449.europe-west1.run.app/"
+
+  - id: "Get backend URL"
+    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        BACKEND_URL="$(gcloud run services describe ${_BACKEND_SERVICE} --region ${_REGION} --format='value(status.url)')"
+        echo "Backend URL: $BACKEND_URL"
+        echo -n "$BACKEND_URL" > backend_url.txt
+
+  # ---------------- FRONTEND ----------------
+  - id: "Build frontend image (inject Vite envs)"
+    name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        BACKEND_URL="$(cat backend_url.txt)"
+        docker build \
+          -t gcr.io/$PROJECT_ID/frontend \
+          -f frontend/Dockerfile \
+          --build-arg VITE_GOOGLE_MAPS_API_KEY="${_VITE_GOOGLE_MAPS_API_KEY}" \
+          --build-arg VITE_API_BASE_URL="$BACKEND_URL" \
+          --build-arg VITE_API_BASE_URL_IMAGE="$BACKEND_URL" \
+          frontend
+
+  - id: "Push frontend image"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["push", "gcr.io/$PROJECT_ID/frontend"]
+
+  - id: "Deploy frontend to Cloud Run"
+    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    entrypoint: "gcloud"
+    args:
+      [
+        "run", "deploy", "${_FRONTEND_SERVICE}",
+        "--image", "gcr.io/$PROJECT_ID/frontend",
+        "--region", "${_REGION}",
+        "--platform", "managed",
+        "--allow-unauthenticated",
+        "--port", "80"
+      ]
