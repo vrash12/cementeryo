@@ -7,7 +7,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const path = require("path");
 
-// ✅ Always load backend/.env (even if you run node from project root)
+// ✅ Always load backend/.env (works even if you run from monorepo root)
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 const { notFound, errorHandler } = require("./middleware/errorHandler");
@@ -16,9 +16,7 @@ const pool = require("./config/database");
 const adminRoutes = require("./routes/admin.routes");
 const visitorRoutes = require("./routes/visitor.routes");
 const plotRoutes = require("./routes/plot.routes");
-
-// ✅ IMPORTANT: THIS FIXES /api/auth/login 404
-const authRoutes = require("./routes/auth.routes");
+const authRoutes = require("./routes/auth.routes"); // ✅ fixes /api/auth/login 404
 
 /**
  * ✅ Serve uploads from backend/uploads
@@ -36,12 +34,11 @@ try {
 
 const app = express();
 
-// ✅ helpful debug
+/* ------------------------------- Debug ---------------------------------- */
 console.log("[SERVER] NODE_ENV:", process.env.NODE_ENV);
 console.log("[SERVER] PORT:", process.env.PORT);
 console.log("[SERVER] JWT_SECRET loaded?", !!process.env.JWT_SECRET);
 
-// Catch crashes so you SEE them
 process.on("unhandledRejection", (err) => {
   console.error("[FATAL] unhandledRejection:", err);
 });
@@ -49,6 +46,7 @@ process.on("uncaughtException", (err) => {
   console.error("[FATAL] uncaughtException:", err);
 });
 
+/* ----------------------------- Middleware -------------------------------- */
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -57,7 +55,7 @@ app.use(
   })
 );
 
-// ✅ CORS (dev-safe)
+// ✅ CORS (dev-safe / Cloud Run safe)
 app.use(
   cors({
     origin: true,
@@ -68,9 +66,10 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ EXACT REQUEST LOGS (so you know what path is really being hit)
+// ✅ Exact request logs (helps diagnose path / host / origin issues)
 app.use((req, res, next) => {
   const start = Date.now();
+
   console.log(`--> ${req.method} ${req.originalUrl}`);
   console.log("    host:", req.headers.host);
   console.log("    origin:", req.headers.origin);
@@ -85,13 +84,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// morgan (optional, keep if you like)
+// morgan (optional)
 app.use(morgan("dev"));
 
-/**
- * ✅ uploads
- * IMPORTANT: multer must save inside backend/uploads/...
- */
+/* ----------------------------- Static Files ------------------------------ */
 app.use(
   "/uploads",
   express.static(UPLOADS_DIR, {
@@ -102,9 +98,11 @@ app.use(
   })
 );
 
-// health
-app.get("/health", (_req, res) => res.json({ ok: true }));
+/* ------------------------------ Health ----------------------------------- */
+// Health endpoint for Cloud Run
+app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
+// Root DB test (optional)
 app.get("/", async (_req, res) => {
   try {
     const result = await pool.query("SELECT NOW() AS now");
@@ -119,23 +117,19 @@ app.get("/", async (_req, res) => {
   }
 });
 
-/**
- * ✅ API routes
- */
-app.use("/api/auth", authRoutes); // ✅ now POST /api/auth/login will exist
+/* ------------------------------ Routes ----------------------------------- */
+app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/visitor", visitorRoutes);
 app.use("/api/plot", plotRoutes);
 
-// Optional combined router (if you really use it)
+// Optional combined router
 if (api) app.use("/api", api);
 
-/**
- * ✅ OPTIONAL: dump registered routes (set env DUMP_ROUTES=1)
- * Helps verify that /api/auth/login is really mounted.
- */
+/* -------------------------- Route Dump Helper ---------------------------- */
 function dumpRoutes(app) {
   const routes = [];
+
   const walk = (stack, prefix = "") => {
     stack.forEach((layer) => {
       if (layer.route && layer.route.path) {
@@ -159,10 +153,7 @@ if (String(process.env.DUMP_ROUTES || "") === "1") {
   dumpRoutes(app);
 }
 
-/**
- * ✅ 404 logger BEFORE your notFound handler
- * (so you see exactly which route is missing)
- */
+/* --------------------------- 404 pre-logger ------------------------------ */
 app.use((req, _res, next) => {
   console.warn("!!! 404 ROUTE NOT FOUND !!!");
   console.warn("method:", req.method);
@@ -172,15 +163,19 @@ app.use((req, _res, next) => {
   next();
 });
 
-// 404 + error handlers
+/* --------------------------- Error Handlers ------------------------------ */
 app.use(notFound);
 app.use(errorHandler);
 
-// ✅ IMPORTANT: force listen on 5000 if env missing
-const PORT = Number(process.env.PORT) || 5000;
+/* ------------------------------ Listen ----------------------------------- */
+/**
+ * ✅ Cloud Run requires listening on process.env.PORT (usually 8080)
+ * ✅ MUST bind to 0.0.0.0 (not localhost)
+ */
+const PORT = Number(process.env.PORT) || 8080;
 
 const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server listening on http://127.0.0.1:${PORT}`);
+  console.log(`🚀 Server listening on 0.0.0.0:${PORT}`);
 });
 
 server.on("error", (err) => {
