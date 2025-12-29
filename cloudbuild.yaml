@@ -1,14 +1,23 @@
+# cloudbuild.yaml
 substitutions:
   _REGION: "europe-west1"
   _BACKEND_SERVICE: "cemetery-backend"
   _FRONTEND_SERVICE: "cemetery-frontend"
-  _VITE_GOOGLE_MAPS_API_KEY: "YOUR_KEY_HERE"
+  _VITE_GOOGLE_MAPS_API_KEY: "YOUR_KEY_HERE"  # better: use Secret Manager
 
 steps:
   # ---------------- BACKEND ----------------
   - id: "Build backend image"
     name: "gcr.io/cloud-builders/docker"
-    args: ["build", "-t", "gcr.io/$PROJECT_ID/backend", "-f", "backend/Dockerfile", "."]
+    args:
+      [
+        "build",
+        "-t",
+        "gcr.io/$PROJECT_ID/backend",
+        "-f",
+        "backend/Dockerfile",
+        "."
+      ]
 
   - id: "Push backend image"
     name: "gcr.io/cloud-builders/docker"
@@ -24,7 +33,8 @@ steps:
         "--region", "${_REGION}",
         "--platform", "managed",
         "--allow-unauthenticated",
-        "--port", "8080"
+        "--port", "8080",
+        "--quiet"
       ]
 
   - id: "Get backend URL"
@@ -35,8 +45,8 @@ steps:
       - |
         set -e
         BACKEND_URL="$(gcloud run services describe ${_BACKEND_SERVICE} --region ${_REGION} --format='value(status.url)')"
-        echo "Backend URL: $BACKEND_URL"
-        echo -n "$BACKEND_URL" > backend_url.txt
+        echo "Backend URL: ${BACKEND_URL}"
+        echo -n "${BACKEND_URL}" > backend_url.txt
 
   # ---------------- FRONTEND ----------------
   - id: "Build frontend image (inject Vite envs)"
@@ -47,12 +57,15 @@ steps:
       - |
         set -e
         BACKEND_URL="$(cat backend_url.txt)"
+
+        # ✅ IMPORTANT:
+        # VITE_API_BASE_URL must include /api because your frontend uses `${API_BASE}/plot/`
         docker build \
           -t gcr.io/$PROJECT_ID/frontend \
           -f frontend/Dockerfile \
           --build-arg VITE_GOOGLE_MAPS_API_KEY="${_VITE_GOOGLE_MAPS_API_KEY}" \
-          --build-arg VITE_API_BASE_URL="$BACKEND_URL" \
-          --build-arg VITE_API_BASE_URL_IMAGE="$BACKEND_URL" \
+          --build-arg VITE_API_BASE_URL="${BACKEND_URL}/api" \
+          --build-arg VITE_API_BASE_URL_IMAGE="${BACKEND_URL}" \
           frontend
 
   - id: "Push frontend image"
@@ -69,5 +82,10 @@ steps:
         "--region", "${_REGION}",
         "--platform", "managed",
         "--allow-unauthenticated",
-        "--port", "80"
+        "--port", "80",
+        "--quiet"
       ]
+
+images:
+  - "gcr.io/$PROJECT_ID/backend"
+  - "gcr.io/$PROJECT_ID/frontend"
