@@ -13,6 +13,6 @@ steps:
 images:
   - "gcr.io/$PROJECT_ID/frontend"
 substitutions:
-  _VITE_GOOGLE_MAPS_API_KEY: "PUT_YOUR_KEY_HERE"
+  _VITE_GOOGLE_MAPS_API_KEY: "AIzaSyB7JcfJ0D3qepMYrKewniftNUjW3RnisHw"
   _VITE_API_BASE_URL: "/api"
-  _VITE_API_BASE_URL_IMAGE: "https://YOUR_BACKEND_URL"
+  _VITE_API_BASE_URL_IMAGE: "https://cementeryo-128257388449.europe-west1.run.app/"
